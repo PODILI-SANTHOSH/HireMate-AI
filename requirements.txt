@@ -7,6 +7,6 @@ pwdlib[argon2]==0.3.1
 pypdf==6.18.1
 python-dotenv==1.0.0
 python-multipart==0.0.32
+Pillow>=10.4,<13
 SQLAlchemy==2.1.6
 uvicorn==0.52.4
-resend>=2.0.0

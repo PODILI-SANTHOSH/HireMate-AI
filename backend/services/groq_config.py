@@ -5,7 +5,9 @@ from dotenv import load_dotenv
 
 
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+project_root = Path(__file__).resolve().parents[1]
+load_dotenv(project_root / ".env")
+load_dotenv(project_root / "backend" / ".env")
 
 
 def get_groq_model():

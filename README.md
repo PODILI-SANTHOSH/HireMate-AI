@@ -1,6 +1,6 @@
 # HireMate AI
 
-HireMate AI is a React/Vite frontend backed by a FastAPI service. The currently implemented workflow accepts PDF or pasted resume text, lets the user review extracted text, calculates deterministic resume scores, and optionally uses Groq for resume interpretation and skill extraction.
+HireMate AI is a React/Vite frontend backed by a FastAPI service. The currently implemented workflow accepts PDF or pasted resume text, lets the user review extracted text, calculates deterministic resume scores, and optionally uses Groq for resume interpretation and skill extraction. Registration and password recovery use short-lived, server-validated CAPTCHAs; login remains CAPTCHA-free. Password recovery requests are held pending until an administrator independently verifies the requester and approves the change.
 
 ## Local development
 
@@ -14,9 +14,9 @@ HireMate AI is a React/Vite frontend backed by a FastAPI service. The currently 
    ```
 
 3. Copy `backend\.env.example` to `backend\.env`. Set `DATABASE_URL` to your
-   Neon PostgreSQL connection string with SSL enabled, and add a Groq key to
-   enable AI-assisted analysis. `GROQ_MODEL` can select another model available
-   to the Groq API.
+   Aiven MySQL or PostgreSQL connection string, set a long random
+   `JWT_SECRET_KEY`, and add a Groq key to enable AI-assisted analysis.
+   `GROQ_MODEL` can select another model available to the Groq API.
 4. Start the API from the repository root:
 
    ```powershell
@@ -48,15 +48,39 @@ The blueprint installs `requirements.txt`, starts `backend.app:app` from the
 repository root, and checks `/api/health`.
 
 Set the blueprint's `sync: false` variables in the Render dashboard:
-`DATABASE_URL`, `GROQ_API_KEY`, `JWT_SECRET_KEY`, `SMTP_EMAIL`,
-`SMTP_APP_PASSWORD`, and `FRONTEND_ORIGIN`. For Neon, use its PostgreSQL
-connection URL with SSL enabled; the backend configures SQLAlchemy's Psycopg
-driver for standard `postgresql://` URLs. Keep the URL in Render's environment
-settings, not in the repository. After the initial deploy has created the
-tables, remove `CREATE_DB_TABLES` from the service environment.
+`DATABASE_URL`, `GROQ_API_KEY`, `JWT_SECRET_KEY`, and `FRONTEND_ORIGIN`. The
+backend supports PostgreSQL URLs through Psycopg and MySQL URLs through
+PyMySQL. For Aiven MySQL, use the provider's SSL-enabled connection parameters.
+Keep the URL in Render's environment settings, not in the repository. After
+the initial deploy has created the tables, remove `CREATE_DB_TABLES` from the
+service environment.
 
 The blueprint uses Render's free plan, which may sleep while idle. Resume
 storage is in memory, so keep the service to a single instance.
+
+CAPTCHA challenges are stored server-side with hashed answers, expire after
+three minutes, and are single-use and bound to registration, recovery, or
+authenticated password changes. Refreshing a challenge invalidates the
+previous challenge for the same requester and purpose. Login does not use
+CAPTCHA.
+
+Forgot Password submissions store a hashed new password in a pending request;
+they never update an account immediately. An authenticated administrator must
+verify identity through an independently verified support channel before
+approving the request. Requests expire after 48 hours, and approval invalidates
+existing user sessions. Administrators are not self-registered: after the
+additive schema migration has run and the administrator account has been
+independently verified and created, a trusted operator with database access grants the role with
+`python -m backend.manage_admin grant ADMIN_EMAIL`. Revoke access with
+`python -m backend.manage_admin revoke ADMIN_EMAIL`. The administrator reviews
+requests from Profile → Password Reset Requests. Configure at least one
+administrator before accepting recovery requests. Granting or revoking the
+role invalidates that user's existing sessions, so they must log in again.
+
+The legacy `/auth/password-reset/confirm` endpoint remains disabled. No SMTP,
+email OTP, or recovery-code verification is used. Legacy hashed recovery-code
+records are retained for database compatibility but are no longer issued or
+accepted. Existing unverified accounts remain unavailable.
 
 ## Scoring and resume handling
 

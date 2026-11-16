@@ -11,17 +11,11 @@ services:
         value: production
       - key: CREATE_DB_TABLES
         value: "true"
-      - key: OTP_EXPIRE_MINUTES
-        value: "5"
       - key: DATABASE_URL
         sync: false
       - key: GROQ_API_KEY
         sync: false
       - key: JWT_SECRET_KEY
-        sync: false
-      - key: SMTP_EMAIL
-        sync: false
-      - key: SMTP_APP_PASSWORD
         sync: false
       - key: FRONTEND_ORIGIN
         sync: false

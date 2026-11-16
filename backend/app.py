@@ -2,6 +2,7 @@ import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import inspect, text
 
 from . import models
 from .database.connection import Base, engine
@@ -15,6 +16,41 @@ is_vercel_deployment = bool(os.getenv("VERCEL"))
 create_db_tables = os.getenv("CREATE_DB_TABLES", "").strip().lower() == "true"
 if create_db_tables or (not is_production and not is_vercel_deployment):
     Base.metadata.create_all(bind=engine)
+else:
+    models.CaptchaChallenge.__table__.create(bind=engine, checkfirst=True)
+    models.AccountRecoveryCode.__table__.create(bind=engine, checkfirst=True)
+    models.PasswordResetRequest.__table__.create(bind=engine, checkfirst=True)
+captcha_columns = {
+    column["name"]
+    for column in inspect(engine).get_columns("captcha_challenges")
+}
+if "purpose" not in captcha_columns:
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "ALTER TABLE captcha_challenges ADD COLUMN "
+                "purpose VARCHAR(16) NOT NULL DEFAULT 'registration'"
+            )
+        )
+user_columns = {
+    column["name"] for column in inspect(engine).get_columns("users")
+}
+if "auth_token_version" not in user_columns:
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "ALTER TABLE users ADD COLUMN "
+                "auth_token_version INTEGER NOT NULL DEFAULT 0"
+            )
+        )
+if "is_admin" not in user_columns:
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "ALTER TABLE users ADD COLUMN "
+                "is_admin BOOLEAN NOT NULL DEFAULT FALSE"
+            )
+        )
 
 frontend_origin = os.getenv("FRONTEND_ORIGIN", "").strip().rstrip("/")
 allowed_origins = [
@@ -58,6 +94,15 @@ def health():
         },
     }
 
+
+# Support both the legacy unprefixed routes used in tests and the /api routes used by the frontend.
+app.include_router(resume.router)
+app.include_router(job.router)
+app.include_router(career.router)
+app.include_router(mock_interview.router)
+app.include_router(roadmap.router)
+app.include_router(auth.router)
+app.include_router(progress_router.router)
 
 app.include_router(resume.router, prefix="/api")
 app.include_router(job.router, prefix="/api")

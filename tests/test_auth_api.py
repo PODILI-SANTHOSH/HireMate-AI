@@ -1,9 +1,17 @@
+import base64
+import io
 import os
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
+from PIL import Image
+
 os.environ["DATABASE_URL"] = "sqlite://"
+os.environ.setdefault(
+    "JWT_SECRET_KEY",
+    "test-only-signing-key-with-at-least-32-bytes",
+)
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -12,10 +20,11 @@ from sqlalchemy.pool import StaticPool
 
 from backend.app import app
 from backend.database.connection import Base
-from backend.models.email_verification import EmailVerification
-from backend.models.password_reset import PasswordReset
+from backend.models.captcha_challenge import CaptchaChallenge
+from backend.models.password_reset_request import PasswordResetRequest
 from backend.models.user import User
 from backend.routers import auth
+from backend.services import captcha
 
 
 TEST_ENGINE = create_engine(
@@ -46,217 +55,231 @@ class AuthApiTests(unittest.TestCase):
         Base.metadata.drop_all(bind=TEST_ENGINE)
         Base.metadata.create_all(bind=TEST_ENGINE)
         self.client = TestClient(app)
-        self.sent_codes = []
-        self.email_patch = patch.object(
-            auth,
-            "send_otp_email",
-            side_effect=lambda email, otp: self.sent_codes.append((email, otp)),
-        )
-        self.email_patch.start()
-        self.sent_reset_codes = []
-        self.reset_email_patch = patch.object(
-            auth,
-            "send_password_reset_email",
-            side_effect=lambda email, otp: self.sent_reset_codes.append(
-                (email, otp)
-            ),
-        )
-        self.reset_email_patch.start()
         self.original_secret = auth.SECRET_KEY
         auth.SECRET_KEY = "test-only-signing-key-with-at-least-32-bytes"
 
     def tearDown(self):
         auth.SECRET_KEY = self.original_secret
-        self.email_patch.stop()
-        self.reset_email_patch.stop()
         self.client.close()
 
-    def register(self, email="Candidate@Example.com"):
-        with patch("backend.routers.auth.secrets.randbelow", return_value=0):
-            response = self.client.post(
-                "/auth/register",
-                json={
-                    "full_name": "Test Candidate",
-                    "email": email,
-                    "password": "safe-test-password",
-                },
+    def create_challenge(self, answer="ABC234", purpose="registration"):
+        with patch.object(
+            captcha,
+            "generate_captcha_answer",
+            return_value=answer,
+        ):
+            response = self.client.get(
+                f"/auth/captcha?purpose={purpose}",
             )
-        return response
+        self.assertEqual(response.status_code, 200)
+        return response.json()
 
-    def get_pending(self, email="candidate@example.com"):
-        with TestSession() as db:
-            return (
-                db.query(EmailVerification)
-                .filter(EmailVerification.email == email)
-                .first()
-            )
+    def register_payload(self, challenge, **overrides):
+        payload = {
+            "full_name": "Test Candidate",
+            "email": "candidate@example.com",
+            "password": "safe-test-password",
+            "challenge_id": challenge["challenge_id"],
+            "captcha_answer": "ABC234",
+        }
+        payload.update(overrides)
+        return payload
 
-    def test_registration_persists_hashed_credentials_and_one_minute_otp(self):
-        response = self.register()
-
+    def create_account(self, email="candidate@example.com"):
+        challenge = self.create_challenge()
+        response = self.client.post(
+            "/auth/register",
+            json=self.register_payload(challenge, email=email),
+        )
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.json()["email"], "candidate@example.com")
-        self.assertNotIn("otp", response.json())
-        self.assertEqual(self.sent_codes, [("candidate@example.com", "100000")])
 
-        pending = self.get_pending("candidate@example.com")
-        self.assertIsNotNone(pending)
-        self.assertEqual(pending.email, "candidate@example.com")
-        self.assertTrue(
-            auth.password_hash.verify("safe-test-password", pending.hashed_password)
+    def login_headers(self, email="candidate@example.com", password="safe-test-password"):
+        response = self.client.post(
+            "/auth/login",
+            json={"email": email, "password": password},
         )
-        self.assertNotEqual(pending.hashed_password, "safe-test-password")
-        self.assertEqual(pending.otp_hash, auth.hash_otp("100000"))
-        self.assertNotEqual(pending.otp_hash, "100000")
-        self.assertEqual(pending.attempts, 0)
-        self.assertEqual(
-            pending.expires_at,
-            pending.created_at + timedelta(minutes=1),
-        )
+        self.assertEqual(response.status_code, 200)
+        return {"Authorization": f"Bearer {response.json()['access_token']}"}
 
-    def test_registration_updates_existing_pending_record_after_cooldown(self):
-        self.assertEqual(self.register().status_code, 201)
-        original_id = self.get_pending().id
+    def password_reset_payload(self, challenge, **overrides):
+        payload = {
+            "email": "candidate@example.com",
+            "new_password": "updated-test-password",
+            "confirm_new_password": "updated-test-password",
+            "challenge_id": challenge["challenge_id"],
+            "captcha_answer": "ABC234",
+        }
+        payload.update(overrides)
+        return payload
 
+    def grant_admin(self, email="admin@example.com"):
         with TestSession() as db:
-            pending = db.query(EmailVerification).one()
-            pending.created_at = datetime.now(timezone.utc).replace(
-                tzinfo=None
-            ) - timedelta(seconds=61)
-            pending.attempts = 1
+            user = db.query(User).filter(User.email == email).one()
+            user.is_admin = True
             db.commit()
 
-        with patch("backend.routers.auth.secrets.randbelow", return_value=1):
-            response = self.client.post(
-                "/auth/register",
-                json={
-                    "full_name": "Updated Candidate",
-                    "email": "CANDIDATE@EXAMPLE.COM",
-                    "password": "updated-test-password",
+    def change_password_payload(self, challenge, **overrides):
+        payload = {
+            "email": "candidate@example.com",
+            "current_password": "safe-test-password",
+            "new_password": "updated-test-password",
+            "confirm_new_password": "updated-test-password",
+            "challenge_id": challenge["challenge_id"],
+            "captcha_answer": "ABC234",
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_captcha_is_generated_as_an_image_and_refreshes(self):
+        with patch.object(
+            captcha,
+            "generate_captcha_answer",
+            side_effect=["ABC234", "DEF567"],
+        ):
+            first = self.client.get("/auth/captcha?purpose=registration")
+            refreshed = self.client.get(
+                "/auth/captcha",
+                params={
+                    "purpose": "registration",
+                    "previous_challenge_id": first.json()["challenge_id"],
                 },
             )
 
-        self.assertEqual(response.status_code, 201)
-        pending = self.get_pending()
-        self.assertEqual(pending.id, original_id)
-        self.assertEqual(pending.full_name, "Updated Candidate")
-        self.assertEqual(pending.otp_hash, auth.hash_otp("100001"))
-        self.assertTrue(
-            auth.password_hash.verify(
-                "updated-test-password",
-                pending.hashed_password,
-            )
-        )
-        self.assertEqual(pending.attempts, 0)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(refreshed.status_code, 200)
+        self.assertIn("no-store", first.headers["cache-control"])
+        first_data = first.json()
+        refreshed_data = refreshed.json()
+        self.assertNotEqual(first_data["challenge_id"], refreshed_data["challenge_id"])
+        self.assertNotEqual(first_data["image"], refreshed_data["image"])
+        self.assertTrue(first_data["image"].startswith("data:image/png;base64,"))
+        self.assertEqual(first_data["expires_in"], 180)
         self.assertEqual(
-            pending.expires_at,
-            pending.created_at + timedelta(minutes=1),
+            set(first_data),
+            {"challenge_id", "image", "expires_in"},
+        )
+        for challenge_data in (first_data, refreshed_data):
+            image_data = challenge_data["image"].partition(",")[2]
+            image_bytes = base64.b64decode(image_data, validate=True)
+            with Image.open(io.BytesIO(image_bytes)) as captcha_image:
+                self.assertEqual(captcha_image.format, "PNG")
+                self.assertEqual(captcha_image.size, (280, 82))
+                self.assertGreater(
+                    len(captcha_image.getcolors(maxcolors=280 * 82) or []),
+                    1,
+                )
+        stale_attempt = self.client.post(
+            "/auth/register",
+            json=self.register_payload(first_data),
+        )
+        self.assertEqual(stale_attempt.status_code, 400)
+        with TestSession() as db:
+            previous_challenge = db.get(
+                CaptchaChallenge,
+                first_data["challenge_id"],
+            )
+            self.assertIsNotNone(previous_challenge.consumed_at)
+            self.assertEqual(db.query(User).count(), 0)
+
+    def test_api_prefixed_auth_routes_are_available(self):
+        challenge = self.create_challenge()
+        response = self.client.post(
+            "/api/auth/register",
+            json=self.register_payload(challenge),
         )
 
-    def test_successful_verification_creates_one_verified_user_and_login_works(self):
-        self.assertEqual(self.register().status_code, 201)
+        self.assertEqual(response.status_code, 201)
+        self.assertNotIn("recovery_code", response.json())
 
-        verified = self.client.post(
-            "/auth/verify-email",
-            json={"email": " CANDIDATE@EXAMPLE.COM ", "otp": "100000"},
+    def test_registration_succeeds_without_email_configuration(self):
+        challenge = self.create_challenge()
+        response = self.client.post(
+            "/auth/register",
+            json=self.register_payload(challenge, captcha_answer="abc234"),
         )
-        self.assertEqual(verified.status_code, 200)
 
-        repeated = self.client.post(
-            "/auth/verify-email",
-            json={"email": "candidate@example.com", "otp": "100000"},
-        )
-        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(response.status_code, 201)
+        self.assertNotIn("recovery_code", response.json())
+        self.assertIn("log in", response.json()["message"].lower())
+        self.assertNotIn("otp", response.json())
 
         with TestSession() as db:
-            users = (
-                db.query(User)
-                .filter(User.email == "candidate@example.com")
-                .all()
+            user = db.query(User).filter(User.email == "candidate@example.com").one()
+            self.assertTrue(user.is_verified)
+            self.assertTrue(
+                auth.password_hash.verify("safe-test-password", user.hashed_password)
             )
-            pending = (
-                db.query(EmailVerification)
-                .filter(EmailVerification.email == "candidate@example.com")
-                .first()
-            )
-            self.assertEqual(len(users), 1)
-            self.assertTrue(users[0].is_verified)
-            self.assertIsNone(pending)
 
-        login = self.client.post(
-            "/auth/login",
+    def test_incorrect_captcha_blocks_registration_and_consumes_challenge(self):
+        challenge = self.create_challenge()
+        wrong = self.client.post(
+            "/auth/register",
+            json=self.register_payload(challenge, captcha_answer="ZZZZZZ"),
+        )
+        self.assertEqual(wrong.status_code, 400)
+        self.assertIn("CAPTCHA", wrong.json()["detail"])
+
+        replay = self.client.post(
+            "/auth/register",
+            json=self.register_payload(challenge),
+        )
+        self.assertEqual(replay.status_code, 400)
+        with TestSession() as db:
+            self.assertEqual(db.query(User).count(), 0)
+            stored_challenge = db.get(
+                CaptchaChallenge,
+                challenge["challenge_id"],
+            )
+            self.assertIsNotNone(stored_challenge)
+            self.assertIsNotNone(stored_challenge.consumed_at)
+
+    def test_registration_endpoint_rejects_requests_without_a_captcha(self):
+        response = self.client.post(
+            "/auth/register",
             json={
-                "email": "CANDIDATE@EXAMPLE.COM",
+                "full_name": "Test Candidate",
+                "email": "candidate@example.com",
                 "password": "safe-test-password",
             },
         )
-        self.assertEqual(login.status_code, 200)
-        self.assertIn("access_token", login.json())
 
-    def test_wrong_otp_is_counted_and_limit_is_enforced(self):
-        self.assertEqual(self.register().status_code, 201)
-
-        wrong = self.client.post(
-            "/auth/verify-email",
-            json={"email": "candidate@example.com", "otp": "999999"},
-        )
-        self.assertEqual(wrong.status_code, 400)
-        self.assertEqual(self.get_pending("candidate@example.com").attempts, 1)
-
-        over_limit = self.client.post(
-            "/auth/verify-email",
-            json={"email": "candidate@example.com", "otp": "100000"},
-        )
-        self.assertEqual(over_limit.status_code, 429)
-        self.assertIsNone(
-            self._get_user("candidate@example.com")
-        )
-
-    def test_expired_otp_is_rejected_and_pending_record_is_removed(self):
-        self.assertEqual(self.register().status_code, 201)
+        self.assertEqual(response.status_code, 422)
         with TestSession() as db:
-            pending = db.query(EmailVerification).one()
-            pending.expires_at = datetime.now(timezone.utc).replace(
-                tzinfo=None
-            ) - timedelta(seconds=1)
+            self.assertEqual(db.query(User).count(), 0)
+
+    def test_empty_captcha_is_rejected_without_creating_an_account(self):
+        challenge = self.create_challenge()
+        response = self.client.post(
+            "/auth/register",
+            json=self.register_payload(challenge, captcha_answer=""),
+        )
+
+        self.assertEqual(response.status_code, 422)
+        with TestSession() as db:
+            self.assertEqual(db.query(User).count(), 0)
+
+    def test_expired_captcha_is_rejected(self):
+        challenge = self.create_challenge()
+        with TestSession() as db:
+            record = db.get(CaptchaChallenge, challenge["challenge_id"])
+            record.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
             db.commit()
 
         response = self.client.post(
-            "/auth/verify-email",
-            json={"email": "candidate@example.com", "otp": "100000"},
+            "/auth/register",
+            json=self.register_payload(challenge),
         )
-        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.status_code, 410)
         self.assertIn("expired", response.json()["detail"].lower())
-        self.assertIsNone(self.get_pending())
 
-    def test_missing_pending_record_returns_clear_not_found_response(self):
-        response = self.client.post(
-            "/auth/verify-email",
-            json={"email": "missing@example.com", "otp": "100000"},
-        )
-        resend = self.client.post(
-            "/auth/resend-otp",
-            json={"email": "missing@example.com"},
-        )
-
-        self.assertEqual(response.status_code, 404)
-        self.assertEqual(
-            response.json()["detail"],
-            "No pending registration found. Please register again.",
-        )
-        self.assertEqual(resend.status_code, 404)
-        self.assertEqual(resend.json()["detail"], response.json()["detail"])
-
-    def test_login_rejects_an_unverified_account(self):
+    def test_login_succeeds_without_captcha(self):
         with TestSession() as db:
             db.add(
                 User(
-                    full_name="Unverified Candidate",
-                    email="unverified@example.com",
-                    hashed_password=auth.password_hash.hash(
-                        "safe-test-password"
-                    ),
-                    is_verified=False,
+                    full_name="Existing Candidate",
+                    email="candidate@example.com",
+                    hashed_password=auth.password_hash.hash("safe-test-password"),
+                    is_verified=True,
                 )
             )
             db.commit()
@@ -264,178 +287,464 @@ class AuthApiTests(unittest.TestCase):
         response = self.client.post(
             "/auth/login",
             json={
-                "email": "unverified@example.com",
+                "email": "candidate@example.com",
                 "password": "safe-test-password",
             },
         )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("access_token", response.json())
+        with TestSession() as db:
+            self.assertEqual(db.query(CaptchaChallenge).count(), 0)
 
-        self.assertEqual(response.status_code, 403)
-        self.assertIn("verify your email", response.json()["detail"].lower())
+    def test_change_password_updates_hash_and_invalidates_old_tokens(self):
+        self.create_account()
+        old_headers = self.login_headers()
+        challenge = self.create_challenge(purpose="password_change")
 
-    def test_resend_requires_only_email_enforces_cooldown_and_resets_expiry(self):
-        with patch("backend.routers.auth.secrets.randbelow", return_value=0):
-            self.assertEqual(self.register().status_code, 201)
-
-            too_soon = self.client.post(
-                "/auth/resend-otp",
-                json={"email": "candidate@example.com"},
-            )
-            self.assertEqual(too_soon.status_code, 429)
-
-            extra_otp = self.client.post(
-                "/auth/resend-otp",
-                json={"email": "candidate@example.com", "otp": "123456"},
-            )
-            self.assertEqual(extra_otp.status_code, 422)
-
-            with TestSession() as db:
-                pending = db.query(EmailVerification).one()
-                pending.created_at = datetime.now(timezone.utc).replace(
-                    tzinfo=None
-                ) - timedelta(seconds=61)
-                pending.attempts = 1
-                db.commit()
-
-        with patch("backend.routers.auth.secrets.randbelow", return_value=1):
-            resent = self.client.post(
-                "/auth/resend-otp",
-                json={"email": " CANDIDATE@EXAMPLE.COM "},
-            )
-
-        self.assertEqual(resent.status_code, 200)
-        self.assertEqual(
-            self.sent_codes,
-            [
-                ("candidate@example.com", "100000"),
-                ("candidate@example.com", "100001"),
-            ],
-        )
-        pending = self.get_pending("candidate@example.com")
-        self.assertEqual(pending.otp_hash, auth.hash_otp("100001"))
-        self.assertEqual(pending.attempts, 0)
-        self.assertEqual(
-            pending.expires_at,
-            pending.created_at + timedelta(minutes=1),
-        )
-
-    def test_password_reset_request_is_generic_for_unknown_email(self):
         response = self.client.post(
-            "/auth/password-reset/request",
-            json={"email": "missing@example.com"},
+            "/auth/password/change",
+            json=self.change_password_payload(challenge),
+            headers=old_headers,
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("If an eligible account exists", response.json()["message"])
-        self.assertEqual(self.sent_reset_codes, [])
-
-    def test_password_reset_changes_password_and_consumes_code(self):
+        self.assertIn("log in", response.json()["message"].lower())
         with TestSession() as db:
-            db.add(
-                User(
-                    full_name="Test Candidate",
-                    email="candidate@example.com",
-                    hashed_password=auth.password_hash.hash(
-                        "original-password"
-                    ),
-                    is_verified=True,
+            user = db.query(User).filter(User.email == "candidate@example.com").one()
+            self.assertTrue(
+                auth.password_hash.verify(
+                    "updated-test-password",
+                    user.hashed_password,
                 )
             )
-            db.commit()
-
-        with patch("backend.routers.auth.secrets.randbelow", return_value=0):
-            requested = self.client.post(
-                "/auth/password-reset/request",
-                json={"email": "CANDIDATE@EXAMPLE.COM"},
+            self.assertFalse(
+                auth.password_hash.verify(
+                    "safe-test-password",
+                    user.hashed_password,
+                )
             )
+            self.assertEqual(user.auth_token_version, 1)
 
-        self.assertEqual(requested.status_code, 200)
         self.assertEqual(
-            self.sent_reset_codes,
-            [("candidate@example.com", "100000")],
+            self.client.get("/auth/me", headers=old_headers).status_code,
+            401,
         )
-
-        reset = self.client.post(
-            "/auth/password-reset/confirm",
-            json={
-                "email": "CANDIDATE@EXAMPLE.COM",
-                "otp": "100000",
-                "new_password": "new-safe-password",
-            },
+        self.assertEqual(
+            self.client.get("/progress", headers=old_headers).status_code,
+            401,
         )
-        self.assertEqual(reset.status_code, 200)
-        self.assertIsNone(
-            self._get_password_reset("candidate@example.com")
-        )
-
-        old_password_login = self.client.post(
-            "/auth/login",
-            json={
-                "email": "candidate@example.com",
-                "password": "original-password",
-            },
-        )
-        new_password_login = self.client.post(
-            "/auth/login",
-            json={
-                "email": "candidate@example.com",
-                "password": "new-safe-password",
-            },
-        )
-        self.assertEqual(old_password_login.status_code, 401)
-        self.assertEqual(new_password_login.status_code, 200)
-
-    def test_password_reset_rejects_wrong_code_and_limits_attempts(self):
-        with TestSession() as db:
-            db.add(
-                User(
-                    full_name="Test Candidate",
-                    email="candidate@example.com",
-                    hashed_password=auth.password_hash.hash(
-                        "original-password"
-                    ),
-                    is_verified=True,
-                )
-            )
-            db.commit()
-
-        with patch("backend.routers.auth.secrets.randbelow", return_value=0):
+        self.assertEqual(
             self.client.post(
-                "/auth/password-reset/request",
-                json={"email": "candidate@example.com"},
-            )
-
-        for _ in range(auth.MAX_PASSWORD_RESET_ATTEMPTS):
-            wrong_code = self.client.post(
-                "/auth/password-reset/confirm",
+                "/auth/login",
                 json={
                     "email": "candidate@example.com",
-                    "otp": "999999",
-                    "new_password": "new-safe-password",
+                    "password": "safe-test-password",
                 },
-            )
-            self.assertEqual(wrong_code.status_code, 400)
+            ).status_code,
+            401,
+        )
+        new_headers = self.login_headers(password="updated-test-password")
+        self.assertEqual(self.client.get("/auth/me", headers=new_headers).status_code, 200)
 
-        over_limit = self.client.post(
+    def test_change_password_rejects_invalid_password_and_captcha_inputs(self):
+        self.create_account()
+        headers = self.login_headers()
+
+        wrong_current = self.client.post(
+            "/auth/password/change",
+            json=self.change_password_payload(
+                self.create_challenge(purpose="password_change"),
+                current_password="wrong-current-password",
+            ),
+            headers=headers,
+        )
+        self.assertEqual(wrong_current.status_code, 401)
+
+        wrong_captcha = self.client.post(
+            "/auth/password/change",
+            json=self.change_password_payload(
+                self.create_challenge(purpose="password_change"),
+                captcha_answer="ZZZZZZ",
+            ),
+            headers=headers,
+        )
+        self.assertEqual(wrong_captcha.status_code, 400)
+
+        expired_challenge = self.create_challenge(purpose="password_change")
+        with TestSession() as db:
+            record = db.get(CaptchaChallenge, expired_challenge["challenge_id"])
+            record.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            db.commit()
+        expired = self.client.post(
+            "/auth/password/change",
+            json=self.change_password_payload(expired_challenge),
+            headers=headers,
+        )
+        self.assertEqual(expired.status_code, 410)
+
+        mismatch = self.client.post(
+            "/auth/password/change",
+            json=self.change_password_payload(
+                self.create_challenge(purpose="password_change"),
+                confirm_new_password="different-new-password",
+            ),
+            headers=headers,
+        )
+        self.assertEqual(mismatch.status_code, 422)
+
+        with TestSession() as db:
+            user = db.query(User).filter(User.email == "candidate@example.com").one()
+            self.assertTrue(
+                auth.password_hash.verify(
+                    "safe-test-password",
+                    user.hashed_password,
+                )
+            )
+            self.assertEqual(user.auth_token_version, 0)
+
+    def test_change_password_cannot_target_another_users_account(self):
+        self.create_account()
+        self.create_account(email="other@example.com")
+        headers = self.login_headers()
+        challenge = self.create_challenge(purpose="password_change")
+
+        response = self.client.post(
+            "/auth/password/change",
+            json=self.change_password_payload(
+                challenge,
+                email="other@example.com",
+            ),
+            headers=headers,
+        )
+
+        self.assertEqual(response.status_code, 403)
+        with TestSession() as db:
+            candidate = db.query(User).filter(User.email == "candidate@example.com").one()
+            other = db.query(User).filter(User.email == "other@example.com").one()
+            self.assertTrue(
+                auth.password_hash.verify(
+                    "safe-test-password",
+                    candidate.hashed_password,
+                )
+            )
+            self.assertTrue(
+                auth.password_hash.verify(
+                    "safe-test-password",
+                    other.hashed_password,
+                )
+            )
+
+    def test_change_password_requires_an_authenticated_user_and_its_captcha_purpose(self):
+        self.create_account()
+        payload = self.change_password_payload(self.create_challenge())
+        unauthenticated = self.client.post(
+            "/auth/password/change",
+            json=payload,
+        )
+        self.assertEqual(unauthenticated.status_code, 401)
+
+        headers = self.login_headers()
+        wrong_purpose = self.client.post(
+            "/auth/password/change",
+            json=payload,
+            headers=headers,
+        )
+        self.assertEqual(wrong_purpose.status_code, 400)
+        with TestSession() as db:
+            user = db.query(User).filter(User.email == "candidate@example.com").one()
+            self.assertTrue(
+                auth.password_hash.verify(
+                    "safe-test-password",
+                    user.hashed_password,
+                )
+            )
+
+    def test_captcha_challenges_are_bound_to_their_purpose(self):
+        recovery_challenge = self.create_challenge(purpose="recovery")
+        response = self.client.post(
+            "/auth/register",
+            json=self.register_payload(recovery_challenge),
+        )
+        self.assertEqual(response.status_code, 400)
+
+        registration_challenge = self.create_challenge()
+        reset = self.client.post(
             "/auth/password-reset/confirm",
+            json=self.password_reset_payload(registration_challenge),
+        )
+        self.assertEqual(reset.status_code, 400)
+        self.assertIn("invalid", reset.json()["detail"].lower())
+
+    def test_captcha_challenge_is_single_use(self):
+        challenge = self.create_challenge()
+        payload = self.register_payload(challenge)
+        self.assertEqual(self.client.post("/auth/register", json=payload).status_code, 201)
+        reused = self.client.post("/auth/register", json=payload)
+        self.assertEqual(reused.status_code, 400)
+
+    def test_captcha_generation_is_rate_limited(self):
+        with patch.object(captcha, "generate_captcha_answer", return_value="ABC234"):
+            for _ in range(captcha.CAPTCHA_MAX_CHALLENGES_PER_WINDOW):
+                challenge_response = self.client.get(
+                    "/auth/captcha?purpose=registration"
+                )
+                self.assertEqual(challenge_response.status_code, 200)
+
+            limited = self.client.get("/auth/captcha?purpose=registration")
+
+        self.assertEqual(limited.status_code, 429)
+
+    def test_password_reset_request_is_generic_and_does_not_change_password(self):
+        self.create_account()
+        known = self.client.post(
+            "/auth/password-reset/request",
+            json=self.password_reset_payload(
+                self.create_challenge(purpose="recovery"),
+            ),
+        )
+        unknown = self.client.post(
+            "/auth/password-reset/request",
+            json=self.password_reset_payload(
+                self.create_challenge(purpose="recovery"),
+                email="unknown@example.com",
+            ),
+        )
+
+        self.assertEqual(known.status_code, 202)
+        self.assertEqual(unknown.status_code, 202)
+        self.assertEqual(known.json(), unknown.json())
+        self.assertNotIn("candidate@example.com", known.text)
+        self.assertNotIn("unknown@example.com", unknown.text)
+        self.assertNotIn("new_password_hash", known.json())
+
+        with TestSession() as db:
+            user = db.query(User).filter(User.email == "candidate@example.com").one()
+            request = db.query(PasswordResetRequest).one()
+            self.assertTrue(
+                auth.password_hash.verify(
+                    "safe-test-password",
+                    user.hashed_password,
+                )
+            )
+            self.assertEqual(request.status, "pending")
+            self.assertEqual(request.user_id, user.id)
+            self.assertEqual(request.pending_user_id, user.id)
+            self.assertNotEqual(request.new_password_hash, "updated-test-password")
+            self.assertTrue(
+                auth.password_hash.verify(
+                    "updated-test-password",
+                    request.new_password_hash,
+                )
+            )
+
+    def test_password_reset_rejects_bad_captcha_and_mismatched_passwords(self):
+        self.create_account()
+        wrong_captcha = self.client.post(
+            "/auth/password-reset/request",
+            json=self.password_reset_payload(
+                self.create_challenge(purpose="recovery"),
+                captcha_answer="ZZZZZZ",
+            ),
+        )
+        mismatch = self.client.post(
+            "/auth/password-reset/request",
+            json=self.password_reset_payload(
+                self.create_challenge(purpose="recovery"),
+                confirm_new_password="different-password",
+            ),
+        )
+
+        self.assertEqual(wrong_captcha.status_code, 400)
+        self.assertEqual(mismatch.status_code, 422)
+        with TestSession() as db:
+            user = db.query(User).filter(User.email == "candidate@example.com").one()
+            self.assertEqual(db.query(PasswordResetRequest).count(), 0)
+            self.assertTrue(
+                auth.password_hash.verify(
+                    "safe-test-password",
+                    user.hashed_password,
+                )
+            )
+
+    def test_duplicate_password_reset_requests_do_not_replace_pending_password(self):
+        self.create_account()
+        first = self.client.post(
+            "/auth/password-reset/request",
+            json=self.password_reset_payload(
+                self.create_challenge(purpose="recovery"),
+            ),
+        )
+        with TestSession() as db:
+            original_hash = db.query(PasswordResetRequest).one().new_password_hash
+
+        duplicate = self.client.post(
+            "/auth/password-reset/request",
+            json=self.password_reset_payload(
+                self.create_challenge(purpose="recovery"),
+                new_password="different-pending-password",
+                confirm_new_password="different-pending-password",
+            ),
+        )
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(duplicate.status_code, 202)
+        self.assertEqual(first.json(), duplicate.json())
+        with TestSession() as db:
+            requests = db.query(PasswordResetRequest).all()
+            self.assertEqual(len(requests), 1)
+            self.assertEqual(requests[0].new_password_hash, original_hash)
+
+    def test_only_admin_can_approve_and_approval_updates_password_once(self):
+        self.create_account()
+        self.create_account(email="admin@example.com")
+        self.grant_admin()
+        old_headers = self.login_headers()
+        admin_headers = self.login_headers(email="admin@example.com")
+        challenge = self.create_challenge(purpose="recovery")
+        submitted = self.client.post(
+            "/auth/password-reset/request",
+            json=self.password_reset_payload(challenge),
+        )
+        self.assertEqual(submitted.status_code, 202)
+
+        unauthenticated = self.client.get("/auth/admin/password-reset-requests")
+        self.assertEqual(unauthenticated.status_code, 401)
+        non_admin = self.client.get(
+            "/auth/admin/password-reset-requests",
+            headers=old_headers,
+        )
+        self.assertEqual(non_admin.status_code, 403)
+        non_admin_approval = self.client.post(
+            "/auth/admin/password-reset-requests/request-id/approve",
+            headers=old_headers,
+        )
+        self.assertEqual(non_admin_approval.status_code, 403)
+
+        requests = self.client.get(
+            "/auth/admin/password-reset-requests",
+            headers=admin_headers,
+        )
+        self.assertEqual(requests.status_code, 200)
+        self.assertEqual(len(requests.json()), 1)
+        self.assertNotIn("new_password_hash", requests.json()[0])
+        request_id = requests.json()[0]["request_id"]
+        approval = self.client.post(
+            f"/auth/admin/password-reset-requests/{request_id}/approve",
+            headers=admin_headers,
+        )
+        self.assertEqual(approval.status_code, 200)
+        duplicate_approval = self.client.post(
+            f"/auth/admin/password-reset-requests/{request_id}/approve",
+            headers=admin_headers,
+        )
+        self.assertEqual(duplicate_approval.status_code, 409)
+
+        old_session = self.client.get("/auth/me", headers=old_headers)
+        self.assertEqual(old_session.status_code, 401)
+        old_password = self.client.post(
+            "/auth/login",
             json={
                 "email": "candidate@example.com",
-                "otp": "100000",
-                "new_password": "new-safe-password",
+                "password": "safe-test-password",
             },
         )
-        self.assertEqual(over_limit.status_code, 429)
+        new_password = self.client.post(
+            "/auth/login",
+            json={
+                "email": "candidate@example.com",
+                "password": "updated-test-password",
+            },
+        )
+        self.assertEqual(old_password.status_code, 401)
+        self.assertEqual(new_password.status_code, 200)
 
-    def _get_password_reset(self, email):
         with TestSession() as db:
-            return (
-                db.query(PasswordReset)
-                .filter(PasswordReset.email == email)
-                .first()
+            request = db.query(PasswordResetRequest).one()
+            user = db.query(User).filter(User.email == "candidate@example.com").one()
+            admin = db.query(User).filter(User.email == "admin@example.com").one()
+            self.assertEqual(request.status, "approved")
+            self.assertEqual(request.reviewed_by_user_id, admin.id)
+            self.assertIsNotNone(request.reviewed_at)
+            self.assertIsNone(request.pending_user_id)
+            self.assertIsNone(request.new_password_hash)
+            self.assertEqual(user.auth_token_version, 1)
+
+    def test_reset_request_rejection_and_expiration_never_change_password(self):
+        self.create_account()
+        self.create_account(email="admin@example.com")
+        self.grant_admin()
+        admin_headers = self.login_headers(email="admin@example.com")
+        self.client.post(
+            "/auth/password-reset/request",
+            json=self.password_reset_payload(
+                self.create_challenge(purpose="recovery"),
+            ),
+        )
+        request_id = self.client.get(
+            "/auth/admin/password-reset-requests",
+            headers=admin_headers,
+        ).json()[0]["request_id"]
+
+        rejected = self.client.post(
+            f"/auth/admin/password-reset-requests/{request_id}/reject",
+            headers=admin_headers,
+        )
+        self.assertEqual(rejected.status_code, 200)
+        with TestSession() as db:
+            request = db.query(PasswordResetRequest).one()
+            self.assertEqual(request.status, "rejected")
+            self.assertIsNotNone(request.reviewed_at)
+            self.assertIsNone(request.new_password_hash)
+
+        self.client.post(
+            "/auth/password-reset/request",
+            json=self.password_reset_payload(
+                self.create_challenge(purpose="recovery"),
+            ),
+        )
+        with TestSession() as db:
+            request = db.query(PasswordResetRequest).filter(
+                PasswordResetRequest.status == "pending"
+            ).one()
+            request.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+            expired_request_id = request.request_id
+            db.commit()
+        expired_approval = self.client.post(
+            f"/auth/admin/password-reset-requests/{expired_request_id}/approve",
+            headers=admin_headers,
+        )
+        self.assertEqual(expired_approval.status_code, 410)
+        with TestSession() as db:
+            user = db.query(User).filter(User.email == "candidate@example.com").one()
+            request = db.query(PasswordResetRequest).filter(
+                PasswordResetRequest.request_id == expired_request_id
+            ).one()
+            self.assertEqual(request.status, "expired")
+            self.assertIsNone(request.pending_user_id)
+            self.assertTrue(
+                auth.password_hash.verify(
+                    "safe-test-password",
+                    user.hashed_password,
+                )
             )
 
-    def _get_user(self, email):
-        with TestSession() as db:
-            return db.query(User).filter(User.email == email).first()
+    def test_email_otp_endpoints_are_removed(self):
+        self.assertEqual(
+            self.client.post(
+                "/auth/verify-email",
+                json={"email": "candidate@example.com", "otp": "123456"},
+            ).status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/auth/resend-otp",
+                json={"email": "candidate@example.com"},
+            ).status_code,
+            404,
+        )
+        self.assertFalse(hasattr(auth, "send_otp_email"))
+        self.assertFalse(hasattr(auth, "send_transactional_email"))
 
 
 if __name__ == "__main__":

@@ -1,11 +1,13 @@
-from .email_verification import EmailVerification
-from .password_reset import PasswordReset
+from .account_recovery_code import AccountRecoveryCode
+from .captcha_challenge import CaptchaChallenge
+from .password_reset_request import PasswordResetRequest
 from .progress import UserProgress
 from .user import User
 
 __all__ = [
-    "EmailVerification",
-    "PasswordReset",
+    "AccountRecoveryCode",
+    "CaptchaChallenge",
+    "PasswordResetRequest",
     "User",
     "UserProgress",
 ]

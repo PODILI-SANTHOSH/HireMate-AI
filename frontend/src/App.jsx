@@ -1,6 +1,7 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import CaptchaVerification from "./components/CaptchaVerification";
 import "./App.css";
 
 const API_BASE_URL = (
@@ -26,6 +27,27 @@ async function readAuthResponse(response) {
     }
     throw new Error("The server returned an invalid response.");
   }
+}
+
+function PasswordVisibilityIcon({ visible }) {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6Z" />
+      {visible ? (
+        <circle cx="12" cy="12" r="3" />
+      ) : (
+        <path d="m4 4 16 16" />
+      )}
+    </svg>
+  );
 }
 
 function App() {
@@ -59,7 +81,6 @@ function App() {
   }
 };
   const [showProfile, setShowProfile] = useState(false);
-  const [showPassword, setShowPassword] = useState(false);
   const [activePage, setActivePage] = useState("Dashboard");
   const [theme, setTheme] = useState(() => {
     try {
@@ -88,23 +109,49 @@ function App() {
   const [authName, setAuthName] = useState("");
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
-  const [authOtp, setAuthOtp] = useState("");
-  const [resendCountdown, setResendCountdown] = useState(60);
-  useEffect(() => {
-    if (!["verify", "reset"].includes(authMode) || resendCountdown <= 0) return;
-
-  const timer = setTimeout(() => {
-    setResendCountdown((previous) => previous - 1);
-  }, 1000);
-
-  return () => clearTimeout(timer);
-}, [authMode, resendCountdown]);
-  const [resendLoading, setResendLoading] = useState(false);
+  const [authConfirmPassword, setAuthConfirmPassword] = useState("");
+  const [showAuthPassword, setShowAuthPassword] = useState(false);
+  const [showForgotConfirmPassword, setShowForgotConfirmPassword] =
+    useState(false);
+  const [captchaSubmission, setCaptchaSubmission] = useState({
+    challengeId: "",
+    answer: "",
+  });
+  const [captchaRefreshKey, setCaptchaRefreshKey] = useState(0);
+  const [captchaError, setCaptchaError] = useState("");
+  const [captchaLoading, setCaptchaLoading] = useState(false);
   const [authSuccess, setAuthSuccess] = useState("");
   const [authError, setAuthError] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
   const authRequestInProgress = useRef(false);
-  const resendRequestInProgress = useRef(false);
+  const [changePasswordForm, setChangePasswordForm] = useState({
+    currentPassword: "",
+    newPassword: "",
+    confirmNewPassword: "",
+  });
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
+  const [showChangeNewPassword, setShowChangeNewPassword] = useState(false);
+  const [showChangeConfirmPassword, setShowChangeConfirmPassword] =
+    useState(false);
+  const [changePasswordCaptcha, setChangePasswordCaptcha] = useState({
+    challengeId: "",
+    answer: "",
+  });
+  const [changePasswordCaptchaRefreshKey, setChangePasswordCaptchaRefreshKey] =
+    useState(0);
+  const [changePasswordCaptchaError, setChangePasswordCaptchaError] =
+    useState("");
+  const [changePasswordCaptchaLoading, setChangePasswordCaptchaLoading] =
+    useState(false);
+  const [changePasswordError, setChangePasswordError] = useState("");
+  const [changePasswordLoading, setChangePasswordLoading] = useState(false);
+  const changePasswordRequestInProgress = useRef(false);
+  const [adminResetRequests, setAdminResetRequests] = useState([]);
+  const [adminResetLoading, setAdminResetLoading] = useState(false);
+  const [adminResetError, setAdminResetError] = useState("");
+  const [adminResetSuccess, setAdminResetSuccess] = useState("");
+  const [adminResetActionId, setAdminResetActionId] = useState("");
+  const adminResetRequestInProgress = useRef(false);
 
   // Learning Roadmap state
   const [roadmapRole, setRoadmapRole] = useState("Python Developer");
@@ -178,66 +225,100 @@ function App() {
   }, [roadmapCompletedTasks]);
   
   
+const handleCaptchaChange = useCallback((value) => {
+  setCaptchaSubmission(value);
+  if (value.answer) {
+    setCaptchaError("");
+    setAuthSuccess("");
+  }
+}, []);
+
+const handleCaptchaLoading = useCallback((loading) => {
+  setCaptchaLoading(loading);
+}, []);
+
+const handleChangePasswordCaptchaChange = useCallback((value) => {
+  setChangePasswordCaptcha(value);
+  if (value.answer) setChangePasswordCaptchaError("");
+}, []);
+
+const handleChangePasswordCaptchaLoading = useCallback((loading) => {
+  setChangePasswordCaptchaLoading(loading);
+}, []);
+
 const handleAuthSubmit = async (event) => {
   event.preventDefault();
   if (authRequestInProgress.current) return;
 
+  const isRegister = authMode === "register";
+  const isRecovery = authMode === "forgot";
+  const passwordConfirmationRequired = isRegister || isRecovery;
+  if (
+    passwordConfirmationRequired &&
+    authPassword !== authConfirmPassword
+  ) {
+    setAuthError(
+      isRecovery ? "New passwords do not match." : "Passwords do not match."
+    );
+    setAuthSuccess("");
+    return;
+  }
+
+  const captchaRequired = isRegister || isRecovery;
+  if (captchaRequired) {
+    if (!captchaSubmission.challengeId) {
+      setCaptchaError("Wait for a CAPTCHA challenge or refresh it.");
+      return;
+    }
+    if (!captchaSubmission.answer.trim()) {
+      setCaptchaError("Please enter the CAPTCHA characters.");
+      return;
+    }
+  }
+
   authRequestInProgress.current = true;
   setAuthError("");
   setAuthSuccess("");
+  if (captchaRequired) setCaptchaError("");
   setAuthLoading(true);
 
+  let shouldRefreshCaptcha = false;
   try {
-    const isRegister = authMode === "register";
-    const isVerify = authMode === "verify";
-    const isPasswordResetRequest = authMode === "forgot";
-    const isPasswordResetConfirm = authMode === "reset";
-
     const endpoint = isRegister
       ? "/auth/register"
-      : isVerify
-        ? "/auth/verify-email"
-        : isPasswordResetRequest
-          ? "/auth/password-reset/request"
-          : isPasswordResetConfirm
-            ? "/auth/password-reset/confirm"
-            : "/auth/login";
-
+      : isRecovery
+        ? "/auth/password-reset/request"
+        : "/auth/login";
     const payload = isRegister
       ? {
           full_name: authName.trim(),
           email: authEmail.trim().toLowerCase(),
           password: authPassword,
+          challenge_id: captchaSubmission.challengeId,
+          captcha_answer: captchaSubmission.answer,
         }
-      : isVerify
+      : isRecovery
         ? {
             email: authEmail.trim().toLowerCase(),
-            otp: authOtp.trim(),
+            new_password: authPassword,
+            confirm_new_password: authConfirmPassword,
+            challenge_id: captchaSubmission.challengeId,
+            captcha_answer: captchaSubmission.answer,
           }
-        : isPasswordResetRequest
-          ? { email: authEmail.trim().toLowerCase() }
-          : isPasswordResetConfirm
-            ? {
-                email: authEmail.trim().toLowerCase(),
-                otp: authOtp.trim(),
-                new_password: authPassword,
-              }
-        : {
-            email: authEmail.trim().toLowerCase(),
-            password: authPassword,
-          };
+      : {
+          email: authEmail.trim().toLowerCase(),
+          password: authPassword,
+        };
 
     const response = await fetch(`${API_BASE_URL}${endpoint}`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-
     const data = await readAuthResponse(response);
 
     if (!response.ok) {
+      shouldRefreshCaptcha = captchaRequired;
       throw new Error(
         typeof data.detail === "string"
           ? data.detail
@@ -246,44 +327,24 @@ const handleAuthSubmit = async (event) => {
     }
 
     if (isRegister) {
-      setAuthEmail(payload.email);
-      setAuthMode("verify");
-      setAuthPassword("");
-      setAuthOtp("");
-      setResendCountdown(60);
-      setAuthSuccess(
-        data.message || "OTP sent to your email. Please check your inbox."
-      );
-      return;
-    }
-
-    if (isVerify) {
       setAuthMode("login");
-      setAuthOtp("");
       setAuthPassword("");
-      setAuthSuccess(
-        data.message || "Email verified successfully! Please log in."
-      );
+      setAuthConfirmPassword("");
+      setCaptchaSubmission({ challengeId: "", answer: "" });
+      setAuthSuccess(data.message || "Account created successfully. You can now log in.");
       return;
     }
 
-    if (isPasswordResetRequest) {
-      setAuthMode("reset");
-      setAuthOtp("");
+    if (isRecovery) {
+      shouldRefreshCaptcha = true;
       setAuthPassword("");
-      setResendCountdown(60);
+      setAuthConfirmPassword("");
+      setShowAuthPassword(false);
+      setShowForgotConfirmPassword(false);
+      setCaptchaSubmission({ challengeId: "", answer: "" });
       setAuthSuccess(
-        data.message || "If an eligible account exists, a reset code will be sent."
-      );
-      return;
-    }
-
-    if (isPasswordResetConfirm) {
-      setAuthMode("login");
-      setAuthOtp("");
-      setAuthPassword("");
-      setAuthSuccess(
-        data.message || "Your password has been reset. You can now log in."
+        data.message ||
+          "If an account matches these details, the request has been submitted for administrator review."
       );
       return;
     }
@@ -294,19 +355,239 @@ const handleAuthSubmit = async (event) => {
     setAuthPassword("");
     setActivePage("Dashboard");
   } catch (error) {
-    setAuthError(error.message || "Could not connect to the server.");
+    shouldRefreshCaptcha = captchaRequired;
+    if (
+      captchaRequired &&
+      error.message?.toLowerCase().includes("captcha")
+    ) {
+      setCaptchaError(error.message);
+    } else {
+      setAuthError(error.message || "Could not connect to the server.");
+    }
   } finally {
+    if (shouldRefreshCaptcha) {
+      setCaptchaSubmission({ challengeId: "", answer: "" });
+      setCaptchaRefreshKey((key) => key + 1);
+    }
     authRequestInProgress.current = false;
     setAuthLoading(false);
   }
 };
+
+const handleChangePasswordSubmit = async (event) => {
+  event.preventDefault();
+  if (changePasswordRequestInProgress.current) return;
+  if (!authToken || !authUser) {
+    setChangePasswordError("Log in before changing your password.");
+    return;
+  }
+
+  if (
+    changePasswordForm.newPassword !==
+    changePasswordForm.confirmNewPassword
+  ) {
+    setChangePasswordError("New passwords do not match.");
+    return;
+  }
+  if (changePasswordForm.newPassword === changePasswordForm.currentPassword) {
+    setChangePasswordError(
+      "New password must be different from the current password."
+    );
+    return;
+  }
+  if (!changePasswordCaptcha.challengeId) {
+    setChangePasswordCaptchaError(
+      "Wait for a CAPTCHA challenge or refresh it."
+    );
+    return;
+  }
+  if (!changePasswordCaptcha.answer.trim()) {
+    setChangePasswordCaptchaError("Please enter the CAPTCHA characters.");
+    return;
+  }
+
+  changePasswordRequestInProgress.current = true;
+  setChangePasswordError("");
+  setChangePasswordCaptchaError("");
+  setChangePasswordLoading(true);
+
+  let shouldRefreshCaptcha = false;
+  try {
+    shouldRefreshCaptcha = true;
+    const response = await fetch(`${API_BASE_URL}/auth/password/change`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${authToken}`,
+      },
+      body: JSON.stringify({
+        email: authUser.email,
+        current_password: changePasswordForm.currentPassword,
+        new_password: changePasswordForm.newPassword,
+        confirm_new_password: changePasswordForm.confirmNewPassword,
+        challenge_id: changePasswordCaptcha.challengeId,
+        captcha_answer: changePasswordCaptcha.answer,
+      }),
+    });
+    const data = await readAuthResponse(response);
+
+    if (!response.ok) {
+      throw new Error(
+        typeof data.detail === "string"
+          ? data.detail
+          : "Could not update the password."
+      );
+    }
+
+    localStorage.removeItem("hiremate-token");
+    setAuthToken("");
+    setAuthUser(null);
+    setAuthEmail(authUser.email || "");
+    setAuthPassword("");
+    setAuthConfirmPassword("");
+    setAuthMode("login");
+    setAuthError("");
+    setAuthSuccess(data.message || "Password updated successfully.");
+    setShowProfile(false);
+    setActivePage("Dashboard");
+    setChangePasswordError("");
+    setChangePasswordCaptchaError("");
+    setShowCurrentPassword(false);
+    setShowChangeNewPassword(false);
+    setShowChangeConfirmPassword(false);
+    setChangePasswordForm({
+      currentPassword: "",
+      newPassword: "",
+      confirmNewPassword: "",
+    });
+  } catch (error) {
+    if (error.message?.toLowerCase().includes("captcha")) {
+      setChangePasswordCaptchaError(error.message);
+    } else {
+      setChangePasswordError(
+        error instanceof TypeError
+          ? "Could not reach the server. Check your connection and try again."
+          : error.message || "Could not update the password."
+      );
+    }
+  } finally {
+    if (shouldRefreshCaptcha) {
+      setChangePasswordCaptcha({ challengeId: "", answer: "" });
+      setChangePasswordCaptchaRefreshKey((key) => key + 1);
+    }
+    changePasswordRequestInProgress.current = false;
+    setChangePasswordLoading(false);
+  }
+};
+
+  const loadAdminPasswordResetRequests = async () => {
+    if (!authToken || !authUser?.is_admin) {
+      setAdminResetError("Administrator access is required.");
+      return;
+    }
+
+    setAdminResetLoading(true);
+    setAdminResetError("");
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/auth/admin/password-reset-requests`,
+        {
+          headers: { Authorization: `Bearer ${authToken}` },
+        }
+      );
+      const data = await readAuthResponse(response);
+      if (!response.ok) {
+        throw new Error(
+          typeof data.detail === "string"
+            ? data.detail
+            : "Could not load password-reset requests."
+        );
+      }
+      setAdminResetRequests(Array.isArray(data) ? data : []);
+    } catch (error) {
+      setAdminResetError(error.message || "Could not load password-reset requests.");
+    } finally {
+      setAdminResetLoading(false);
+    }
+  };
+
+  const handleAdminPasswordResetDecision = async (requestId, decision) => {
+    if (
+      adminResetRequestInProgress.current ||
+      !authToken ||
+      !authUser?.is_admin
+    ) {
+      return;
+    }
+
+    adminResetRequestInProgress.current = true;
+    setAdminResetActionId(requestId);
+    setAdminResetError("");
+    setAdminResetSuccess("");
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/auth/admin/password-reset-requests/${encodeURIComponent(
+          requestId
+        )}/${decision}`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${authToken}` },
+        }
+      );
+      const data = await readAuthResponse(response);
+      if (!response.ok) {
+        throw new Error(
+          typeof data.detail === "string"
+            ? data.detail
+            : "Could not process the password-reset request."
+        );
+      }
+
+      setAdminResetRequests((requests) =>
+        requests.filter((request) => request.request_id !== requestId)
+      );
+      setAdminResetSuccess(data.message || "Request processed.");
+    } catch (error) {
+      setAdminResetError(
+        error.message || "Could not process the password-reset request."
+      );
+    } finally {
+      adminResetRequestInProgress.current = false;
+      setAdminResetActionId("");
+    }
+  };
+
+  const openAdminPasswordResetRequests = () => {
+    setAdminResetError("");
+    setAdminResetSuccess("");
+    setShowProfile(false);
+    setActivePage("Password Reset Requests");
+    void loadAdminPasswordResetRequests();
+  };
 
   const handleLogout = () => {
     localStorage.removeItem("hiremate-token");
     setAuthToken("");
     setAuthUser(null);
     setAuthPassword("");
+    setAuthConfirmPassword("");
     setAuthMode("login");
+    setCaptchaSubmission({ challengeId: "", answer: "" });
+    setChangePasswordForm({
+      currentPassword: "",
+      newPassword: "",
+      confirmNewPassword: "",
+    });
+    setChangePasswordCaptcha({ challengeId: "", answer: "" });
+    setChangePasswordError("");
+    setChangePasswordCaptchaError("");
+    setShowCurrentPassword(false);
+    setShowChangeNewPassword(false);
+    setShowChangeConfirmPassword(false);
+    setAdminResetRequests([]);
+    setAdminResetError("");
+    setAdminResetSuccess("");
+    setAdminResetActionId("");
     setActivePage("Dashboard");
   };
   
@@ -372,57 +653,6 @@ const handleAuthSubmit = async (event) => {
     };
   }, []);
   
-
-const handleResendOtp = async () => {
-  if (
-    resendCountdown > 0 ||
-    resendLoading ||
-    authLoading ||
-    resendRequestInProgress.current
-  ) return;
-
-  resendRequestInProgress.current = true;
-  setResendLoading(true);
-  setAuthError("");
-  setAuthSuccess("");
-
-  try {
-    const endpoint = authMode === "reset"
-      ? "/auth/password-reset/request"
-      : "/auth/resend-otp";
-    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        email: authEmail.trim().toLowerCase(),
-      }),
-    });
-
-    const data = await readAuthResponse(response);
-
-    if (!response.ok) {
-      throw new Error(
-        typeof data.detail === "string"
-          ? data.detail
-          : "Could not resend OTP."
-      );
-    }
-
-    setAuthError("");
-    setAuthSuccess(
-      data.message || "A new code has been sent to your email."
-    );
-    setResendCountdown(60);
-    setAuthOtp("");
-  } catch (error) {
-    setAuthError(error.message || "Could not connect to the server.");
-  } finally {
-    resendRequestInProgress.current = false;
-    setResendLoading(false);
-  }
-};
 
   // ============================================================
   // RESUME UPLOAD
@@ -2648,16 +2878,142 @@ const renderLearningRoadmap = () => {
 };
 
 
-const renderAuthPage = () => (
-  <div
-    className={`auth-page ${
-      authMode === "login" || authMode === "register"
-        ? "auth-page-split"
-        : ""
-    } ${authMode === "login" ? "auth-page-login" : ""} ${
-      authMode === "register" ? "auth-page-register" : ""
-    }`}
-  >
+const renderAuthPage = () => {
+  if (authMode === "forgot") {
+    return (
+      <div className="auth-page">
+        <form
+          className="auth-card auth-card-forgot"
+          onSubmit={handleAuthSubmit}
+        >
+          <div className="auth-logo">H</div>
+          <h1>Forgot password</h1>
+          <p>
+            Requests are applied only after an administrator independently
+            verifies your identity.
+          </p>
+
+          <label htmlFor="auth-email">Email address</label>
+          <input
+            id="auth-email"
+            type="email"
+            value={authEmail}
+            onChange={(event) => {
+              setAuthEmail(event.target.value);
+              setAuthError("");
+              setAuthSuccess("");
+            }}
+            autoComplete="email"
+            required
+          />
+
+          <label htmlFor="auth-password">New password</label>
+          <div className="auth-password-input-wrap">
+            <input
+              id="auth-password"
+              type={showAuthPassword ? "text" : "password"}
+              value={authPassword}
+              onChange={(event) => {
+                setAuthPassword(event.target.value);
+                setAuthError("");
+                setAuthSuccess("");
+              }}
+              minLength={8}
+              maxLength={128}
+              autoComplete="new-password"
+              required
+            />
+            <button
+              className="auth-password-visibility"
+              type="button"
+              onClick={() => setShowAuthPassword((visible) => !visible)}
+              aria-label={showAuthPassword ? "Hide new password" : "Show new password"}
+              aria-pressed={showAuthPassword}
+            >
+              <PasswordVisibilityIcon visible={showAuthPassword} />
+            </button>
+          </div>
+
+          <label htmlFor="auth-confirm-password">Confirm new password</label>
+          <div className="auth-password-input-wrap">
+            <input
+              id="auth-confirm-password"
+              type={showForgotConfirmPassword ? "text" : "password"}
+              value={authConfirmPassword}
+              onChange={(event) => {
+                setAuthConfirmPassword(event.target.value);
+                setAuthError("");
+                setAuthSuccess("");
+              }}
+              minLength={8}
+              maxLength={128}
+              autoComplete="new-password"
+              required
+            />
+            <button
+              className="auth-password-visibility"
+              type="button"
+              onClick={() =>
+                setShowForgotConfirmPassword((visible) => !visible)
+              }
+              aria-label={
+                showForgotConfirmPassword
+                  ? "Hide confirm new password"
+                  : "Show confirm new password"
+              }
+              aria-pressed={showForgotConfirmPassword}
+            >
+              <PasswordVisibilityIcon visible={showForgotConfirmPassword} />
+            </button>
+          </div>
+          {authConfirmPassword &&
+            !authError &&
+            authPassword !== authConfirmPassword && (
+              <p className="auth-field-validation" role="alert">
+                New passwords do not match.
+              </p>
+            )}
+
+          <CaptchaVerification
+            key="recovery"
+            apiBaseUrl={API_BASE_URL}
+            purpose="recovery"
+            label="CAPTCHA"
+            onChange={handleCaptchaChange}
+            onLoadingChange={handleCaptchaLoading}
+            refreshKey={captchaRefreshKey}
+            error={captchaError}
+          />
+
+          {authError && !authSuccess && (
+            <p className="auth-message" role="alert">
+              {authError}
+            </p>
+          )}
+          {authSuccess && (
+            <p className="auth-message" role="status">
+              {authSuccess}
+            </p>
+          )}
+
+          <button
+            className="primary-btn auth-submit"
+            type="submit"
+            disabled={authLoading || captchaLoading}
+          >
+            {authLoading ? "Submitting..." : "Update Password"}
+          </button>
+        </form>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={`auth-page auth-page-split ${
+        authMode === "login" ? "auth-page-login" : "auth-page-register"
+      }`}
+    >
     {(authMode === "login" || authMode === "register") && (
       <aside className="auth-brand-panel" aria-label="About HireMate AI">
         <div className="auth-brand">
@@ -2763,38 +3119,18 @@ const renderAuthPage = () => (
 
     <form
       className={`auth-card ${
-        authMode === "login"
-          ? "auth-card-login"
-          : authMode === "register"
-            ? "auth-card-register"
-            : ""
+        authMode === "login" ? "auth-card-login" : "auth-card-register"
       }`}
       onSubmit={handleAuthSubmit}
     >
       <div className="auth-logo">H</div>
 
-      <h1>
-        {authMode === "register"
-          ? "Create account"
-          : authMode === "verify"
-            ? "Verify your email"
-            : authMode === "forgot"
-              ? "Forgot password?"
-              : authMode === "reset"
-                ? "Reset your password"
-                : "Welcome back"}
-      </h1>
+      <h1>{authMode === "register" ? "Create account" : "Welcome back"}</h1>
 
       <p>
         {authMode === "register"
           ? "Join HireMate AI and track your career progress."
-          : authMode === "verify"
-            ? `Enter the 6-digit verification code sent to ${authEmail}.`
-            : authMode === "forgot"
-              ? "Enter your account email and we’ll send a password reset code if an eligible account exists."
-              : authMode === "reset"
-                ? `Enter the reset code sent to ${authEmail} and choose a new password.`
-                : "Log in to continue your career journey."}
+          : "Log in to continue your career journey."}
       </p>
 
       {authMode === "register" && (
@@ -2803,7 +3139,7 @@ const renderAuthPage = () => (
           <input
             id="auth-name"
             value={authName}
-            onChange={(e) => setAuthName(e.target.value)}
+            onChange={(event) => setAuthName(event.target.value)}
             minLength={2}
             maxLength={100}
             autoComplete="name"
@@ -2817,77 +3153,69 @@ const renderAuthPage = () => (
         id="auth-email"
         type="email"
         value={authEmail}
-        onChange={(e) => setAuthEmail(e.target.value)}
+        onChange={(event) => setAuthEmail(event.target.value)}
         autoComplete="email"
-        readOnly={authMode === "verify" || authMode === "reset"}
         required
       />
 
-      {(authMode === "verify" || authMode === "reset") && (
+      <label htmlFor="auth-password">Password</label>
+      <div className="auth-password-input-wrap">
+        <input
+          id="auth-password"
+          type={showAuthPassword ? "text" : "password"}
+          value={authPassword}
+          onChange={(event) => {
+            setAuthPassword(event.target.value);
+            setAuthError("");
+          }}
+          minLength={authMode === "login" ? undefined : 8}
+          maxLength={128}
+          autoComplete={
+            authMode === "login" ? "current-password" : "new-password"
+          }
+          required
+        />
+        <button
+          className="auth-password-visibility"
+          type="button"
+          onClick={() => setShowAuthPassword((visible) => !visible)}
+          aria-label={showAuthPassword ? "Hide password" : "Show password"}
+          aria-pressed={showAuthPassword}
+        >
+          <PasswordVisibilityIcon visible={showAuthPassword} />
+        </button>
+      </div>
+      {authMode === "register" && (
         <>
-          <label htmlFor="auth-otp">
-            {authMode === "reset" ? "Password reset code" : "Verification code"}
-          </label>
-          <input
-            id="auth-otp"
-            type="text"
-            inputMode="numeric"
-            pattern="[0-9]{6}"
-            maxLength={6}
-            placeholder="Enter 6-digit code"
-            value={authOtp}
-            onChange={(e) =>
-              setAuthOtp(e.target.value.replace(/\D/g, "").slice(0, 6))
-            }
-            autoComplete="one-time-code"
-            required
-          />
+          <label htmlFor="auth-confirm-password">Confirm password</label>
+          <div className="auth-password-input-wrap">
+            <input
+              id="auth-confirm-password"
+              type="password"
+              value={authConfirmPassword}
+              onChange={(event) => {
+                setAuthConfirmPassword(event.target.value);
+                setAuthError("");
+              }}
+              minLength={8}
+              maxLength={128}
+              autoComplete="new-password"
+              required
+            />
+          </div>
         </>
       )}
 
-      {(authMode === "register" ||
-        authMode === "login" ||
-        authMode === "reset") && (
-        <>
-          <label htmlFor="auth-password">
-            {authMode === "reset"
-              ? "New password"
-              : authMode === "register"
-                ? "Password"
-                : "Password"}
-          </label>
-          <div className="password-input-wrapper">
-            <input
-              id="auth-password"
-              type={showPassword ? "text" : "password"}
-              value={authPassword}
-              onChange={(e) => setAuthPassword(e.target.value)}
-              minLength={
-                authMode === "register" || authMode === "reset" ? 8 : undefined
-              }
-              maxLength={128}
-              autoComplete={
-                authMode === "register" || authMode === "reset"
-                  ? "new-password"
-                  : "current-password"
-              }
-              required
-            />
-
-            <button
-              type="button"
-              className="password-toggle"
-              onClick={() =>
-                setShowPassword((previous) => !previous)
-              }
-              aria-label={
-                showPassword ? "Hide password" : "Show password"
-              }
-            >
-              {showPassword ? "Hide" : "Show"}
-            </button>
-          </div>
-        </>
+      {authMode === "register" && (
+        <CaptchaVerification
+          key="registration"
+          apiBaseUrl={API_BASE_URL}
+          purpose="registration"
+          onChange={handleCaptchaChange}
+          onLoadingChange={handleCaptchaLoading}
+          refreshKey={captchaRefreshKey}
+          error={captchaError}
+        />
       )}
 
       {authMode === "login" && (
@@ -2898,7 +3226,12 @@ const renderAuthPage = () => (
               setAuthMode("forgot");
               setAuthError("");
               setAuthSuccess("");
+              setCaptchaError("");
+              setCaptchaSubmission({ challengeId: "", answer: "" });
+              setShowAuthPassword(false);
+              setShowForgotConfirmPassword(false);
               setAuthPassword("");
+              setAuthConfirmPassword("");
             }}
           >
             Forgot password?
@@ -2906,106 +3239,314 @@ const renderAuthPage = () => (
         </p>
       )}
 
-{authError && !authSuccess && (
-  <p className="auth-message" role="alert">
-    {authError}
-  </p>
-)}
+      {authError && !authSuccess && (
+        <p className="auth-message" role="alert">
+          {authError}
+        </p>
+      )}
 
-{authSuccess && (
-  <p className="auth-message" role="status">
-    {authSuccess}
-  </p>
-)}
+      {authSuccess && (
+        <p className="auth-message" role="status">
+          {authSuccess}
+        </p>
+      )}
 
-{(authMode === "verify" || authMode === "reset") && (
-  <div className="resend-otp-section">
-    <button
-      type="button"
-      className="auth-resend-btn"
-      onClick={handleResendOtp}
-      disabled={authLoading || resendCountdown > 0 || resendLoading}
-    >
-      {resendLoading
-        ? "Sending..."
-        : resendCountdown > 0
-          ? `Resend OTP in ${resendCountdown}s`
-          : "Resend OTP"}
-    </button>
-  </div>
-)}
-
-<button
-  className="primary-btn auth-submit"
-  type="submit"
-  disabled={authLoading}
->
-  {authLoading
-    ? "Please wait..."
-    : authMode === "register"
-      ? "Create account"
-      : authMode === "verify"
-        ? "Verify Email"
-        : authMode === "forgot"
-          ? "Send reset code"
-          : authMode === "reset"
-            ? "Reset password"
+      <button
+        className="primary-btn auth-submit"
+        type="submit"
+        disabled={
+          authLoading ||
+          (authMode === "register" && captchaLoading)
+        }
+      >
+        {authLoading
+          ? "Please wait..."
+          : authMode === "register"
+            ? "Create account"
             : "Log in"}
-</button>
-      <p className="auth-switch">
-        {authMode === "verify" ? (
-          <button
-            type="button"
-            onClick={() => {
-              setAuthMode("register");
-              setAuthOtp("");
-              setAuthError("");
-              setAuthSuccess("");
-            }}
-          >
-            Back to registration
-          </button>
-        ) : authMode === "forgot" || authMode === "reset" ? (
-          <button
-            type="button"
-            onClick={() => {
-              setAuthMode("login");
-              setAuthOtp("");
-              setAuthPassword("");
-              setAuthError("");
-              setAuthSuccess("");
-            }}
-          >
-            Back to log in
-          </button>
-        ) : (
-          <>
-            {authMode === "register"
-              ? "Already have an account?"
-              : "New to HireMate AI?"}{" "}
+      </button>
 
-            <button
-              type="button"
-              onClick={() => {
-                setAuthMode(
-                  authMode === "register" ? "login" : "register"
-                );
-                setAuthError("");
-                setAuthSuccess("");
-              }}
-            >
-              {authMode === "register" ? "Log in" : "Create account"}
-            </button>
-          </>
-        )}
+      <p className="auth-switch">
+        {authMode === "register"
+          ? "Already have an account?"
+          : "New to HireMate AI?"}{" "}
+        <button
+          type="button"
+          onClick={() => {
+            setAuthMode(authMode === "register" ? "login" : "register");
+            setAuthError("");
+            setAuthSuccess("");
+            setCaptchaError("");
+            setAuthPassword("");
+            setAuthConfirmPassword("");
+            setCaptchaSubmission({ challengeId: "", answer: "" });
+          }}
+        >
+          {authMode === "register" ? "Log in" : "Create account"}
+        </button>
       </p>
     </form>
-  </div>
+    </div>
+  );
+};
+
+
+const renderChangePasswordPage = () => (
+  <section className="profile-page change-password-page">
+    <h1>Change Password</h1>
+    <p>Verify your current password to update this account.</p>
+
+    <form
+      className="auth-card change-password-form"
+      onSubmit={handleChangePasswordSubmit}
+    >
+      <label htmlFor="change-password-email">Email address</label>
+      <input
+        id="change-password-email"
+        type="email"
+        value={authUser.email || ""}
+        autoComplete="email"
+        readOnly
+        required
+      />
+
+      <label htmlFor="change-password-current">Current password</label>
+      <div className="auth-password-input-wrap">
+        <input
+          id="change-password-current"
+          type={showCurrentPassword ? "text" : "password"}
+          value={changePasswordForm.currentPassword}
+          onChange={(event) => {
+            setChangePasswordForm((form) => ({
+              ...form,
+              currentPassword: event.target.value,
+            }));
+            setChangePasswordError("");
+          }}
+          autoComplete="current-password"
+          maxLength={128}
+          required
+        />
+        <button
+          className="auth-password-visibility"
+          type="button"
+          onClick={() => setShowCurrentPassword((visible) => !visible)}
+          aria-label={`${
+            showCurrentPassword ? "Hide" : "Show"
+          } current password`}
+          aria-pressed={showCurrentPassword}
+        >
+          <PasswordVisibilityIcon visible={showCurrentPassword} />
+        </button>
+      </div>
+
+      <label htmlFor="change-password-new">New password</label>
+      <div className="auth-password-input-wrap">
+        <input
+          id="change-password-new"
+          type={showChangeNewPassword ? "text" : "password"}
+          value={changePasswordForm.newPassword}
+          onChange={(event) => {
+            setChangePasswordForm((form) => ({
+              ...form,
+              newPassword: event.target.value,
+            }));
+            setChangePasswordError("");
+          }}
+          autoComplete="new-password"
+          minLength={8}
+          maxLength={128}
+          required
+        />
+        <button
+          className="auth-password-visibility"
+          type="button"
+          onClick={() => setShowChangeNewPassword((visible) => !visible)}
+          aria-label={`${
+            showChangeNewPassword ? "Hide" : "Show"
+          } new password`}
+          aria-pressed={showChangeNewPassword}
+        >
+          <PasswordVisibilityIcon visible={showChangeNewPassword} />
+        </button>
+      </div>
+      {changePasswordForm.newPassword.length > 0 &&
+        changePasswordForm.newPassword.length < 8 && (
+          <p className="auth-field-validation" role="status">
+            Password must be at least 8 characters.
+          </p>
+        )}
+
+      <label htmlFor="change-password-confirm">Confirm new password</label>
+      <div className="auth-password-input-wrap">
+        <input
+          id="change-password-confirm"
+          type={showChangeConfirmPassword ? "text" : "password"}
+          value={changePasswordForm.confirmNewPassword}
+          onChange={(event) => {
+            setChangePasswordForm((form) => ({
+              ...form,
+              confirmNewPassword: event.target.value,
+            }));
+            setChangePasswordError("");
+          }}
+          autoComplete="new-password"
+          minLength={8}
+          maxLength={128}
+          required
+        />
+        <button
+          className="auth-password-visibility"
+          type="button"
+          onClick={() =>
+            setShowChangeConfirmPassword((visible) => !visible)
+          }
+          aria-label={`${
+            showChangeConfirmPassword ? "Hide" : "Show"
+          } confirm new password`}
+          aria-pressed={showChangeConfirmPassword}
+        >
+          <PasswordVisibilityIcon visible={showChangeConfirmPassword} />
+        </button>
+      </div>
+      {changePasswordForm.confirmNewPassword &&
+        changePasswordForm.newPassword !==
+          changePasswordForm.confirmNewPassword && (
+          <p className="auth-field-validation" role="alert">
+            New passwords do not match.
+          </p>
+        )}
+
+      <CaptchaVerification
+        key="change-password"
+        apiBaseUrl={API_BASE_URL}
+        purpose="password_change"
+        label="CAPTCHA"
+        onChange={handleChangePasswordCaptchaChange}
+        onLoadingChange={handleChangePasswordCaptchaLoading}
+        refreshKey={changePasswordCaptchaRefreshKey}
+        error={changePasswordCaptchaError}
+      />
+
+      {changePasswordError && (
+        <p className="auth-message" role="alert">
+          {changePasswordError}
+        </p>
+      )}
+
+      <button
+        className="primary-btn auth-submit"
+        type="submit"
+        disabled={changePasswordLoading || changePasswordCaptchaLoading}
+      >
+        {changePasswordLoading ? "Updating..." : "Update Password"}
+      </button>
+    </form>
+  </section>
 );
 
+const renderAdminPasswordResetRequests = () => (
+  <section className="profile-page">
+    <button
+      type="button"
+      className="secondary-btn"
+      onClick={() => {
+        setActivePage("Dashboard");
+        setShowProfile(true);
+      }}
+    >
+      Back to Profile
+    </button>
+
+    <h1>Password Reset Requests</h1>
+    <p>
+      Verify each requester through an independently verified support channel
+      before approving. Approval updates the password and invalidates existing
+      sessions.
+    </p>
+    <button
+      type="button"
+      className="secondary-btn"
+      onClick={() => void loadAdminPasswordResetRequests()}
+      disabled={adminResetLoading}
+    >
+      {adminResetLoading ? "Refreshing..." : "Refresh requests"}
+    </button>
+
+    {adminResetError && (
+      <p className="auth-message" role="alert">
+        {adminResetError}
+      </p>
+    )}
+    {adminResetSuccess && (
+      <p className="auth-message" role="status">
+        {adminResetSuccess}
+      </p>
+    )}
+    {adminResetLoading && <p role="status">Loading password-reset requests...</p>}
+    {!adminResetLoading &&
+      !adminResetError &&
+      adminResetRequests.length === 0 && (
+        <p>No pending password-reset requests.</p>
+      )}
+    <div className="admin-reset-requests">
+      {adminResetRequests.map((request) => (
+        <article className="profile-details-card" key={request.request_id}>
+          <h2>{request.email}</h2>
+          <p>
+            <strong>Requested:</strong>{" "}
+            {new Date(request.requested_at).toLocaleString()}
+          </p>
+          <p>
+            <strong>Expires:</strong>{" "}
+            {new Date(request.expires_at).toLocaleString()}
+          </p>
+          <div className="admin-reset-actions">
+            <button
+              type="button"
+              className="primary-btn"
+              disabled={Boolean(adminResetActionId)}
+              onClick={() =>
+                handleAdminPasswordResetDecision(
+                  request.request_id,
+                  "approve"
+                )
+              }
+            >
+              {adminResetActionId === request.request_id
+                ? "Processing..."
+                : "Approve"}
+            </button>
+            <button
+              type="button"
+              className="secondary-btn"
+              disabled={Boolean(adminResetActionId)}
+              onClick={() =>
+                handleAdminPasswordResetDecision(
+                  request.request_id,
+                  "reject"
+                )
+              }
+            >
+              Reject
+            </button>
+          </div>
+        </article>
+      ))}
+    </div>
+  </section>
+);
 
 const renderPage = () => {
   switch (activePage) {
+    case "Change Password":
+      return renderChangePasswordPage();
+
+    case "Password Reset Requests":
+      return authUser?.is_admin
+        ? renderAdminPasswordResetRequests()
+        : renderDashboard();
+
     case "Resume Analyzer":
       return renderResumeAnalyzer();
 
@@ -3282,7 +3823,42 @@ return (
       <p><strong>Name:</strong> {authUser.full_name || "Not provided"}</p>
       <p><strong>Email:</strong> {authUser.email || "Not provided"}</p>
       <p><strong>Phone:</strong> {authUser.phone || "Not provided"}</p>
+      <button
+        type="button"
+        className="secondary-btn"
+        onClick={() => {
+          setChangePasswordForm({
+            currentPassword: "",
+            newPassword: "",
+            confirmNewPassword: "",
+          });
+          setShowCurrentPassword(false);
+          setShowChangeNewPassword(false);
+          setShowChangeConfirmPassword(false);
+          setChangePasswordCaptcha({ challengeId: "", answer: "" });
+          setChangePasswordCaptchaError("");
+          setChangePasswordError("");
+          setShowProfile(false);
+          setActivePage("Change Password");
+        }}
+      >
+        Change Password
+      </button>
     </div>
+
+    {authUser.is_admin && (
+      <div className="profile-details-card">
+        <h2>Administrator tools</h2>
+        <p>Review pending password-reset requests after verifying identity.</p>
+        <button
+          type="button"
+          className="primary-btn"
+          onClick={openAdminPasswordResetRequests}
+        >
+          Password Reset Requests
+        </button>
+      </div>
+    )}
 
     <div className="profile-details-card">
   <h2>My Career Progress</h2>
