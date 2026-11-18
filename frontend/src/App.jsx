@@ -3750,34 +3750,6 @@ return (
 
         </nav>
 
-        <div className="sidebar-bottom">
-
-          <div className="ai-status">
-
-            <span className={`status-dot ${aiStatus}`}></span>
-
-            <div>
-
-              <strong>
-                AI Engine
-              </strong>
-
-              <small>
-                {aiStatus === "configured"
-                  ? "Groq connected"
-                  : aiStatus === "not-configured"
-                    ? "AI setup needed"
-                    : aiStatus === "unavailable"
-                      ? "Backend unavailable"
-                      : "Checking connection..."}
-              </small>
-
-            </div>
-
-          </div>
-
-        </div>
-
       </aside>
 
       {/* MAIN */}
@@ -3803,10 +3775,6 @@ return (
           </div>
 
           <div className="topbar-right">
-
-            <span className="ai-badge">
-              <><i className="fa-solid fa-wand-magic-sparkles me-1" aria-hidden="true"></i> AI Powered</>
-            </span>
 
             <button
               type="button"
