@@ -4,6 +4,41 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import CaptchaVerification from "./components/CaptchaVerification";
 import "./App.css";
 
+
+const PAGE_ROUTES = {
+  "#dashboard": "Dashboard",
+  "#resume-analyzer": "Resume Analyzer",
+  "#job-match": "Job Match",
+  "#career-assistant": "Career Assistant",
+  "#mock-interview": "Mock Interview",
+  "#learning-roadmap": "Learning Roadmap",
+  "#profile": "Profile",
+  "#change-password": "Change Password",
+  "#password-reset-requests": "Password Reset Requests",
+};
+
+const ROUTE_TO_HASH = {
+  "Dashboard": "#dashboard",
+  "Resume Analyzer": "#resume-analyzer",
+  "Job Match": "#job-match",
+  "Career Assistant": "#career-assistant",
+  "Mock Interview": "#mock-interview",
+  "Learning Roadmap": "#learning-roadmap",
+  "Profile": "#profile",
+  "Change Password": "#change-password",
+  "Password Reset Requests": "#password-reset-requests",
+};
+
+function getInitialPage() {
+  if (typeof window !== "undefined" && window.location.hash) {
+    const hash = window.location.hash.toLowerCase();
+    if (PAGE_ROUTES[hash]) {
+      return PAGE_ROUTES[hash];
+    }
+  }
+  return "Dashboard";
+}
+
 const API_BASE_URL = (
   import.meta.env.VITE_API_BASE_URL ||
   (import.meta.env.DEV
@@ -81,7 +116,33 @@ function App() {
   }
 };
   const [showProfile, setShowProfile] = useState(false);
-  const [activePage, setActivePage] = useState("Dashboard");
+  const [activePage, setActivePageState] = useState(getInitialPage);
+
+  const setActivePage = (page) => {
+    setActivePageState(page);
+    if (typeof window !== "undefined") {
+      const hash = ROUTE_TO_HASH[page] || "#dashboard";
+      if (window.location.hash !== hash) {
+        window.history.pushState(null, "", hash);
+      }
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  };
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const hash = window.location.hash.toLowerCase();
+      const targetPage = PAGE_ROUTES[hash] || "Dashboard";
+      setActivePageState(targetPage);
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    window.addEventListener("hashchange", handlePopState);
+    return () => {
+      window.removeEventListener("popstate", handlePopState);
+      window.removeEventListener("hashchange", handlePopState);
+    };
+  }, []);
   const [theme, setTheme] = useState(() => {
     try {
       return localStorage.getItem("hiremate-theme") === "dark"
@@ -926,7 +987,7 @@ try {
             </p>
 
             <h1>
-              Welcome to HireMate AI 👋
+              Welcome to HireMate AI
             </h1>
 
             <p>
@@ -951,7 +1012,7 @@ try {
 
           <div className="stat-card">
             <div className="stat-icon purple">
-              📄
+              <i className="fa-solid fa-file-lines" aria-hidden="true"></i>
             </div>
 
             <div>
@@ -967,7 +1028,7 @@ try {
 
           <div className="stat-card">
             <div className="stat-icon blue">
-              🎯
+              <i className="fa-solid fa-bullseye" aria-hidden="true"></i>
             </div>
 
             <div>
@@ -985,7 +1046,7 @@ try {
 
           <div className="stat-card">
             <div className="stat-icon green">
-              💼
+              <i className="fa-solid fa-briefcase" aria-hidden="true"></i>
             </div>
 
             <div>
@@ -1001,7 +1062,7 @@ try {
 
           <div className="stat-card">
             <div className="stat-icon orange">
-              🧠
+              <i className="fa-solid fa-brain" aria-hidden="true"></i>
             </div>
 
             <div>
@@ -1033,7 +1094,7 @@ try {
               </div>
 
               <span className="card-icon">
-                📊
+                <i className="fa-solid fa-chart-pie" aria-hidden="true"></i>
               </span>
             </div>
 
@@ -1071,7 +1132,7 @@ try {
               <div className="empty-dashboard">
 
                 <div>
-                  📄
+                  <i className="fa-solid fa-file-arrow-up text-muted fa-2x" aria-hidden="true"></i>
                 </div>
 
                 <h3>
@@ -1113,7 +1174,7 @@ try {
               </div>
 
               <span className="card-icon">
-                🚀
+                <i className="fa-solid fa-rocket" aria-hidden="true"></i>
               </span>
             </div>
 
@@ -1132,7 +1193,7 @@ try {
                   }
                 >
                   {resumeData
-                    ? "✓ Ready"
+                    ? (<><i className="fa-solid fa-check text-success me-1" aria-hidden="true"></i> Ready</>)
                     : "Pending"}
                 </b>
               </div>
@@ -1150,7 +1211,7 @@ try {
                   }
                 >
                   {atsResult
-                    ? "✓ Completed"
+                    ? (<><i className="fa-solid fa-check text-success me-1" aria-hidden="true"></i> Completed</>)
                     : "Pending"}
                 </b>
               </div>
@@ -1168,7 +1229,7 @@ try {
                   }
                 >
                   {matchResult
-                    ? "✓ Completed"
+                    ? (<><i className="fa-solid fa-check text-success me-1" aria-hidden="true"></i> Completed</>)
                     : "Pending"}
                 </b>
               </div>
@@ -1207,7 +1268,7 @@ try {
         <div className="feature-grid">
 
           <FeatureCard
-            icon="📄"
+            icon={<i className="fa-solid fa-file-lines" aria-hidden="true"></i>}
             title="Resume Analyzer"
             description="Get an ATS score and detailed resume feedback."
             onClick={() =>
@@ -1218,7 +1279,7 @@ try {
           />
 
           <FeatureCard
-            icon="🎯"
+            icon={<i className="fa-solid fa-bullseye" aria-hidden="true"></i>}
             title="Job Match"
             description="Compare your resume against any job description."
             onClick={() =>
@@ -1229,7 +1290,7 @@ try {
           />
 
           <FeatureCard
-            icon="🤖"
+            icon={<i className="fa-solid fa-robot" aria-hidden="true"></i>}
             title="AI Career Assistant"
             description="Ask questions about your resume, skills and career."
             onClick={() =>
@@ -1240,7 +1301,7 @@ try {
           />
 
           <FeatureCard
-            icon="🎤"
+            icon={<i className="fa-solid fa-microphone" aria-hidden="true"></i>}
             title="Mock Interview"
             description="Practice questions based on your resume and job."
             onClick={() =>
@@ -1251,7 +1312,7 @@ try {
           />
 
           <FeatureCard
-            icon="📚"
+            icon={<i className="fa-solid fa-graduation-cap" aria-hidden="true"></i>}
             title="Learning Roadmap"
             description="Find what skills you should learn next."
             onClick={() =>
@@ -1262,7 +1323,7 @@ try {
           />
 
           <FeatureCard
-            icon="💡"
+            icon={<i className="fa-solid fa-lightbulb" aria-hidden="true"></i>}
             title="AI Recommendations"
             description="Get personalized suggestions to improve your applications."
             onClick={() =>
@@ -1335,7 +1396,7 @@ try {
         >
 
           <div className="upload-icon">
-            📄
+            <i className="fa-solid fa-file-lines" aria-hidden="true"></i>
           </div>
 
           <h2>
@@ -1546,7 +1607,7 @@ try {
 
             <div className="analysis-section quality-score-section">
               <div className="section-title">
-                <span>✍️</span>
+                <i className="fa-solid fa-pen-to-square" aria-hidden="true"></i>
                 <h2>Resume Content Quality</h2>
               </div>
               <div className="quality-score-summary">
@@ -1579,7 +1640,7 @@ try {
                 <div className="section-title">
 
                   <span>
-                    📊
+                    <i className="fa-solid fa-chart-column" aria-hidden="true"></i>
                   </span>
 
                   <h2>
@@ -1621,7 +1682,7 @@ try {
               <div className="analysis-section">
 
                 <div className="section-title">
-                  <span>🎓</span>
+                  <i className="fa-solid fa-graduation-cap text-primary" aria-hidden="true"></i>
 
                   <h2>
                     Career Field
@@ -1641,7 +1702,7 @@ try {
               <div className="analysis-section">
 
                 <div className="section-title">
-                  <span>📑</span>
+                  <i className="fa-solid fa-file-lines text-primary" aria-hidden="true"></i>
 
                   <h2>
                     Detected Resume Sections
@@ -1672,7 +1733,7 @@ try {
               <div className="analysis-section">
 
                 <div className="section-title">
-                  <span>🧠</span>
+                  <i className="fa-solid fa-brain text-primary" aria-hidden="true"></i>
 
                   <h2>
                     Detected Skills
@@ -1698,7 +1759,7 @@ try {
 
             <AnalysisSection
               title="Strengths"
-              icon="✓"
+              icon={<i className="fa-solid fa-check text-success" aria-hidden="true"></i>}
               className="strengths"
               items={atsResult.strengths}
             />
@@ -1707,7 +1768,7 @@ try {
 
             <AnalysisSection
               title="Weaknesses"
-              icon="✗"
+              icon={<i className="fa-solid fa-xmark text-danger" aria-hidden="true"></i>}
               className="weaknesses"
               items={atsResult.weaknesses}
             />
@@ -1730,7 +1791,7 @@ try {
               <div className="analysis-section">
 
                 <div className="section-title">
-                  <span>🤖</span>
+                  <i className="fa-solid fa-robot text-primary" aria-hidden="true"></i>
 
                   <h2>
                     AI Assessment
@@ -1749,7 +1810,7 @@ try {
             {atsResult.experience?.length > 0 && (
               <AnalysisSection
                 title="Experience"
-                icon="💼"
+                icon={<i className="fa-solid fa-briefcase" aria-hidden="true"></i>}
                 className="experience"
                 items={atsResult.experience}
               />
@@ -1760,7 +1821,7 @@ try {
             {atsResult.education?.length > 0 && (
               <AnalysisSection
                 title="Education"
-                icon="🎓"
+                icon={<i className="fa-solid fa-graduation-cap" aria-hidden="true"></i>}
                 className="education"
                 items={atsResult.education}
               />
@@ -1771,7 +1832,7 @@ try {
             {atsResult.projects?.length > 0 && (
               <AnalysisSection
                 title="Projects"
-                icon="🛠️"
+                icon={<i className="fa-solid fa-wrench" aria-hidden="true"></i>}
                 className="projects"
                 items={atsResult.projects}
               />
@@ -1782,7 +1843,7 @@ try {
             {atsResult.certifications?.length > 0 && (
               <AnalysisSection
                 title="Certifications"
-                icon="🏆"
+                icon={<i className="fa-solid fa-trophy" aria-hidden="true"></i>}
                 className="certifications"
                 items={atsResult.certifications}
               />
@@ -1793,7 +1854,7 @@ try {
             {atsResult.achievements?.length > 0 && (
               <AnalysisSection
                 title="Achievements"
-                icon="⭐"
+                icon={<i className="fa-solid fa-star" aria-hidden="true"></i>}
                 className="achievements"
                 items={atsResult.achievements}
               />
@@ -1804,7 +1865,7 @@ try {
             {atsResult.quantifiable_evidence?.length > 0 && (
               <AnalysisSection
                 title="Verified Resume Evidence"
-                icon="📈"
+                icon={<i className="fa-solid fa-chart-line" aria-hidden="true"></i>}
                 className="evidence"
                 items={
                   atsResult.quantifiable_evidence
@@ -1852,7 +1913,7 @@ try {
           <div className="notice-card job-match-notice">
 
             <span>
-              ⚠️
+              <i className="fa-solid fa-triangle-exclamation text-warning" aria-hidden="true"></i>
             </span>
 
             <div>
@@ -1994,7 +2055,7 @@ try {
 
               <SkillResultCard
                 title="Matched Skills"
-                icon="✓"
+                icon={<i className="fa-solid fa-check text-success" aria-hidden="true"></i>}
                 className="matched"
                 skills={
                   matchResult.matched_skills
@@ -2003,7 +2064,7 @@ try {
 
               <SkillResultCard
                 title="Missing Skills"
-                icon="⚠"
+                icon={<i className="fa-solid fa-triangle-exclamation text-warning" aria-hidden="true"></i>}
                 className="missing"
                 skills={
                   matchResult.missing_skills
@@ -2019,7 +2080,7 @@ try {
               <div className="section-title">
 
                 <span>
-                  🎯
+                  <i className="fa-solid fa-bullseye" aria-hidden="true"></i>
                 </span>
 
                 <h2>
@@ -2050,7 +2111,7 @@ try {
                 <div className="section-title">
 
                   <span>
-                    💡
+                    <i className="fa-solid fa-lightbulb text-warning" aria-hidden="true"></i>
                   </span>
 
                   <h2>
@@ -2156,7 +2217,7 @@ try {
         <div className="career-chat-messages" aria-live="polite">
           {!careerSubmittedQuestion && !careerAnswer && !careerError && !careerLoading ? (
             <div className="career-chat-welcome">
-              <span className="career-welcome-mark" aria-hidden="true">✦</span>
+              <span className="career-welcome-mark" aria-hidden="true"><i className="fa-solid fa-wand-magic-sparkles"></i></span>
               <h3>What would you like to work on?</h3>
               <p>
                 Ask a career question for practical advice based on your resume,
@@ -2380,7 +2441,7 @@ try {
         <div className="page-header">
           <div>
             <p className="eyebrow">AI INTERVIEW PRACTICE</p>
-            <h1>🎤 Mock Interview</h1>
+            <h1><i className="fa-solid fa-microphone me-2" aria-hidden="true"></i> Mock Interview</h1>
             <p>Practice answering questions and receive AI-powered feedback.</p>
           </div>
         </div>
@@ -2456,7 +2517,7 @@ try {
 
         {interviewError && (
           <div className="notice-card" role="alert">
-            <span>⚠️</span>
+            <span><i className="fa-solid fa-triangle-exclamation text-warning" aria-hidden="true"></i></span>
             <div>{interviewError}</div>
           </div>
         )}
@@ -2514,13 +2575,13 @@ try {
                 <h3>Strengths</h3>
                 {Array.isArray(interviewFeedback.strengths) &&
                   interviewFeedback.strengths.map((item, index) => (
-                    <p key={index}>✅ {item}</p>
+                    <p key={index}><i className="fa-solid fa-circle-check text-success me-2" aria-hidden="true"></i>{item}</p>
                   ))}
 
                 <h3>Areas to improve</h3>
                 {Array.isArray(interviewFeedback.improvements) &&
                   interviewFeedback.improvements.map((item, index) => (
-                    <p key={index}>💡 {item}</p>
+                    <p key={index}><i className="fa-solid fa-lightbulb text-warning me-2" aria-hidden="true"></i>{item}</p>
                   ))}
 
                 <h3>Sample answer</h3>
@@ -2557,7 +2618,7 @@ try {
 
         {interviewFinished && (
           <div className="coming-soon-card">
-            <h2>🎉 Interview completed!</h2>
+            <h2><i className="fa-solid fa-award text-success me-2" aria-hidden="true"></i>Interview Completed</h2>
             <p>You have answered all the questions in this session.</p>
             <button
               className="primary-btn"
@@ -2648,7 +2709,7 @@ const renderLearningRoadmap = () => {
       <div className="page-header">
         <div>
           <p className="eyebrow">PERSONALIZED LEARNING</p>
-          <h1>📚 Learning Roadmap</h1>
+          <h1><i className="fa-solid fa-graduation-cap me-2" aria-hidden="true"></i> Learning Roadmap</h1>
           <p>Create a weekly learning plan for your target career.</p>
         </div>
       </div>
@@ -3017,7 +3078,7 @@ const renderAuthPage = () => {
     {(authMode === "login" || authMode === "register") && (
       <aside className="auth-brand-panel" aria-label="About HireMate AI">
         <div className="auth-brand">
-          <span className="auth-brand-logo" aria-hidden="true">H</span>
+          <img src="/hiremate-icon.png" alt="HireMate" className="auth-brand-logo-img" aria-hidden="true" />
           <span>HireMate <strong>AI</strong></span>
         </div>
 
@@ -3586,7 +3647,7 @@ return (
         <div className="brand">
 
           <div className="brand-logo">
-            H
+            <img src="/hiremate-icon.png" alt="HireMate Logo" className="brand-icon-img" />
           </div>
 
           <div>
@@ -3610,7 +3671,7 @@ return (
           </p>
 
           <NavItem
-            icon="⌂"
+            icon={<i className="fa-solid fa-house" aria-hidden="true"></i>}
             label="Dashboard"
             active={
               activePage === "Dashboard"
@@ -3621,7 +3682,7 @@ return (
           />
 
           <NavItem
-            icon="📄"
+            icon={<i className="fa-solid fa-file-lines" aria-hidden="true"></i>}
             label="Resume Analyzer"
             active={
               activePage === "Resume Analyzer"
@@ -3634,7 +3695,7 @@ return (
           />
 
           <NavItem
-            icon="🎯"
+            icon={<i className="fa-solid fa-bullseye" aria-hidden="true"></i>}
             label="Job Match"
             active={
               activePage === "Job Match"
@@ -3649,7 +3710,7 @@ return (
           </p>
 
           <NavItem
-            icon="🤖"
+            icon={<i className="fa-solid fa-robot" aria-hidden="true"></i>}
             label="Career Assistant"
             active={
               activePage === "Career Assistant"
@@ -3662,7 +3723,7 @@ return (
           />
 
           <NavItem
-            icon="🎤"
+            icon={<i className="fa-solid fa-microphone" aria-hidden="true"></i>}
             label="Mock Interview"
             active={
               activePage === "Mock Interview"
@@ -3675,7 +3736,7 @@ return (
           />
 
           <NavItem
-            icon="📚"
+            icon={<i className="fa-solid fa-graduation-cap" aria-hidden="true"></i>}
             label="Learning Roadmap"
             active={
               activePage === "Learning Roadmap"
@@ -3744,7 +3805,7 @@ return (
           <div className="topbar-right">
 
             <span className="ai-badge">
-              ✨ AI Powered
+              <><i className="fa-solid fa-wand-magic-sparkles me-1" aria-hidden="true"></i> AI Powered</>
             </span>
 
             <button

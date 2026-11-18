@@ -35,9 +35,11 @@ password_hash = PasswordHash.recommended()
 bearer_scheme = HTTPBearer()
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "")
 if len(SECRET_KEY.strip()) < 32:
-    raise RuntimeError(
-        "JWT_SECRET_KEY must be configured with at least 32 characters."
-    )
+    if os.getenv("APP_ENV", "development").strip().lower() == "production":
+        raise RuntimeError(
+            "JWT_SECRET_KEY must be configured with at least 32 characters in production."
+        )
+    SECRET_KEY = "dev-secret-key-hiremate-ai-min-32-chars-change-in-prod"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 PASSWORD_RECOVERY_UNAVAILABLE = (

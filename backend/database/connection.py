@@ -50,13 +50,24 @@ elif database_url.drivername not in {
     )
 
 if database_url.drivername in {"sqlite", "sqlite+pysqlite"}:
-    connect_args = {"check_same_thread": False}
+    connect_args = {"check_same_thread": False, "timeout": 30}
+    engine_kwargs = {
+        "pool_pre_ping": True,
+        "connect_args": connect_args,
+    }
+else:
+    engine_kwargs = {
+        "pool_pre_ping": True,
+        "pool_recycle": 1800,
+        "pool_size": int(os.getenv("DB_POOL_SIZE", "10")),
+        "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "20")),
+        "pool_timeout": int(os.getenv("DB_POOL_TIMEOUT", "30")),
+        "connect_args": connect_args,
+    }
 
 engine = create_engine(
     database_url,
-    pool_pre_ping=True,
-    pool_recycle=1800 if database_url.drivername == "mysql+pymysql" else -1,
-    connect_args=connect_args,
+    **engine_kwargs,
 )
 
 SessionLocal = sessionmaker(
@@ -66,3 +77,11 @@ SessionLocal = sessionmaker(
 )
 
 Base = declarative_base()
+
+
+def dispose_engine():
+    """Cleanly close and dispose all pooled connections to prevent connection leaks."""
+    try:
+        engine.dispose()
+    except Exception:
+        pass

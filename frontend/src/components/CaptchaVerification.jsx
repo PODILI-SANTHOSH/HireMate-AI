@@ -3,8 +3,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 export default function CaptchaVerification({
   apiBaseUrl,
   purpose,
-  onChange,
-  onLoadingChange,
+  onChange = () => {},
+  onLoadingChange = () => {},
   refreshKey,
   error,
   label = "Security check",
@@ -18,7 +18,9 @@ export default function CaptchaVerification({
   const challengeIdRef = useRef("");
 
   useEffect(() => {
-    onLoadingChange(loading || imageLoading);
+    if (typeof onLoadingChange === "function") {
+      onLoadingChange(loading || imageLoading);
+    }
   }, [imageLoading, loading, onLoadingChange]);
 
   const refreshCaptcha = useCallback(async () => {
