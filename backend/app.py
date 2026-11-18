@@ -1,56 +1,91 @@
 import os
 
+import logging
+import os
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import inspect, text
 
 from . import models
-from .database.connection import Base, engine
+from .database.connection import Base, engine, dispose_engine
 from .routers import auth, career, job, mock_interview, progress as progress_router
 from .routers import resume, roadmap
 from .services.groq_config import get_groq_model, is_groq_configured
 
-app = FastAPI()
-is_production = os.getenv("APP_ENV", "development").strip().lower() == "production"
-is_vercel_deployment = bool(os.getenv("VERCEL"))
-create_db_tables = os.getenv("CREATE_DB_TABLES", "").strip().lower() == "true"
-if create_db_tables or (not is_production and not is_vercel_deployment):
-    Base.metadata.create_all(bind=engine)
-else:
-    models.CaptchaChallenge.__table__.create(bind=engine, checkfirst=True)
-    models.AccountRecoveryCode.__table__.create(bind=engine, checkfirst=True)
-    models.PasswordResetRequest.__table__.create(bind=engine, checkfirst=True)
-captcha_columns = {
-    column["name"]
-    for column in inspect(engine).get_columns("captcha_challenges")
-}
-if "purpose" not in captcha_columns:
-    with engine.begin() as connection:
-        connection.execute(
-            text(
-                "ALTER TABLE captcha_challenges ADD COLUMN "
-                "purpose VARCHAR(16) NOT NULL DEFAULT 'registration'"
-            )
-        )
-user_columns = {
-    column["name"] for column in inspect(engine).get_columns("users")
-}
-if "auth_token_version" not in user_columns:
-    with engine.begin() as connection:
-        connection.execute(
-            text(
-                "ALTER TABLE users ADD COLUMN "
-                "auth_token_version INTEGER NOT NULL DEFAULT 0"
-            )
-        )
-if "is_admin" not in user_columns:
-    with engine.begin() as connection:
-        connection.execute(
-            text(
-                "ALTER TABLE users ADD COLUMN "
-                "is_admin BOOLEAN NOT NULL DEFAULT FALSE"
-            )
-        )
+logger = logging.getLogger(__name__)
+
+
+def init_db():
+    """Safely initialize database tables and apply required schema migrations."""
+    is_production = os.getenv("APP_ENV", "development").strip().lower() == "production"
+    is_vercel_deployment = bool(os.getenv("VERCEL"))
+    create_db_tables = os.getenv("CREATE_DB_TABLES", "").strip().lower() == "true"
+    if create_db_tables or (not is_production and not is_vercel_deployment):
+        Base.metadata.create_all(bind=engine)
+    else:
+        models.CaptchaChallenge.__table__.create(bind=engine, checkfirst=True)
+        models.AccountRecoveryCode.__table__.create(bind=engine, checkfirst=True)
+        models.PasswordResetRequest.__table__.create(bind=engine, checkfirst=True)
+
+    inspector = inspect(engine)
+    if inspector.has_table("captcha_challenges"):
+        captcha_columns = {
+            column["name"]
+            for column in inspector.get_columns("captcha_challenges")
+        }
+        if "purpose" not in captcha_columns:
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "ALTER TABLE captcha_challenges ADD COLUMN "
+                        "purpose VARCHAR(16) NOT NULL DEFAULT 'registration'"
+                    )
+                )
+
+    if inspector.has_table("users"):
+        user_columns = {
+            column["name"] for column in inspector.get_columns("users")
+        }
+        if "auth_token_version" not in user_columns:
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "ALTER TABLE users ADD COLUMN "
+                        "auth_token_version INTEGER NOT NULL DEFAULT 0"
+                    )
+                )
+        if "is_admin" not in user_columns:
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "ALTER TABLE users ADD COLUMN "
+                        "is_admin BOOLEAN NOT NULL DEFAULT FALSE"
+                    )
+                )
+
+
+# Safely execute initial schema sync
+try:
+    init_db()
+except Exception as error:
+    logger.warning("Initial database schema sync deferred or failed: %s", error)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup phase
+    try:
+        init_db()
+    except Exception as error:
+        logger.warning("Startup database check failed: %s", error)
+    yield
+    # Shutdown phase: Cleanly dispose pooled database connections
+    dispose_engine()
+
+
+app = FastAPI(lifespan=lifespan)
 
 frontend_origin = os.getenv("FRONTEND_ORIGIN", "").strip().rstrip("/")
 allowed_origins = [
